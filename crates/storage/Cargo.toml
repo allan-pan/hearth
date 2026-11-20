@@ -1,0 +1,13 @@
+[package]
+name = "storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrow = "59"
+futures = "0.3"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "fs", "sync"] }
+vortex = { version = "0.93.0", features = ["files", "tokio"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
