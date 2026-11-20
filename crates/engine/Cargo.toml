@@ -8,5 +8,3 @@ storage = { path = "../storage" }
 sqlparser = "0.64"
 arrow = "59"
 
-[lints.cargo]
-unused_dependencies = "allow"
