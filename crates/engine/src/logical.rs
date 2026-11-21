@@ -1,5 +1,4 @@
-//! Logical plans: trees of operators over tables, with every name resolved and every
-//! expression typed. The binder produces them, and every later stage reads them.
+//! Logical plans.
 use std::fmt;
 use std::sync::Arc;
 
@@ -9,27 +8,15 @@ use storage::table::Snapshot;
 use crate::expr::Expr;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "built by the binder in step 2.1b")
-)]
 pub enum LogicalPlan {
-    /// Reads every column of `table` at the version in `snapshot`.
     Scan { table: String, snapshot: Snapshot },
-    /// Computes each expression over its input and outputs it under the paired name.
     Project {
         input: Box<LogicalPlan>,
         exprs: Vec<(Expr, String)>,
     },
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the binder in step 2.1b")
-)]
 impl LogicalPlan {
-    /// The columns this node outputs. Column indexes in the expressions of the node above
-    /// refer to positions in this schema.
     pub fn schema(&self) -> SchemaRef {
         match self {
             LogicalPlan::Scan { snapshot, .. } => snapshot.schema.clone(),
@@ -47,15 +34,7 @@ impl LogicalPlan {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "reached only through Display, until the binder builds plans in step 2.1b"
-    )
-)]
 impl LogicalPlan {
-    /// Writes this node on one line, then its input indented two more spaces.
     fn fmt_indented(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
         write!(f, "{:indent$}", "", indent = depth * 2)?;
         match self {
@@ -67,7 +46,6 @@ impl LogicalPlan {
                         write!(f, ", ")?;
                     }
                     write!(f, "{expr}")?;
-                    // Show the output name only when it differs from the column's own name.
                     let same_name = matches!(expr, Expr::Column { name, .. } if name == alias);
                     if !same_name {
                         write!(f, " AS {alias}")?;
@@ -80,7 +58,6 @@ impl LogicalPlan {
     }
 }
 
-/// An indented tree, one node per line, read bottom-up. Plan tests compare against this text.
 impl fmt::Display for LogicalPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_indented(f, 0)

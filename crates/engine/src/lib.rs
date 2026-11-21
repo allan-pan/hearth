@@ -34,7 +34,8 @@ impl Engine {
     }
 
     pub fn sql(&self, sql: &str) -> EngineResult<QueryResult> {
-        Parser::parse_sql(&GenericDialect {}, sql)?;
+        let statements = Parser::parse_sql(&GenericDialect {}, sql)?;
+        let _plan = sql::bind(statements, self.catalog.as_ref())?;
         Err(EngineError::NotSupported(
             "query execution not implemented".to_string(),
         ))

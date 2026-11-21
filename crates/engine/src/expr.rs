@@ -1,26 +1,14 @@
-//! Bound, typed expressions: the per-row calculations inside plan nodes.
+//! Bound, typed expressions and constants.
 use std::fmt;
 
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, Schema};
 
-/// A calculation evaluated once per row of a plan node's input.
-///
-/// Column indexes refer to positions in the input's schema. The binder guarantees they are in
-/// range, so the methods here index the schema directly.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "built by the binder in step 2.1b")
-)]
 pub enum Expr {
-    /// The column at `index` in the input. `name` is only for display.
+    /// `name` is only for display.
     Column { index: usize, name: String },
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the binder in step 2.1b")
-)]
 impl Expr {
     pub fn data_type(&self, input: &Schema) -> DataType {
         match self {
@@ -43,7 +31,6 @@ impl fmt::Display for Expr {
     }
 }
 
-/// A typed constant. The engine's one representation of literals, from binding to execution.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     not(test),
@@ -79,13 +66,11 @@ impl ScalarValue {
                 precision, scale, ..
             } => DataType::Decimal128(*precision, *scale),
             ScalarValue::Date32(_) => DataType::Date32,
-            // Storage's string columns are Utf8View, so literals match them.
             ScalarValue::Utf8(_) => DataType::Utf8View,
         }
     }
 }
 
-/// Prints the value as SQL would spell it, so plan text reads like the query.
 impl fmt::Display for ScalarValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -105,7 +90,6 @@ impl fmt::Display for ScalarValue {
             ScalarValue::Date32(days) => {
                 match arrow::temporal_conversions::date32_to_datetime(*days) {
                     Some(dt) => write!(f, "date '{}'", dt.format("%Y-%m-%d")),
-                    // Outside chrono's range. Display must not panic, so show the raw value.
                     None => write!(f, "date({days} days)"),
                 }
             }
@@ -168,7 +152,6 @@ mod tests {
                 DataType::Decimal128(15, 2),
             ),
             (ScalarValue::Date32(0), DataType::Date32),
-            // Utf8View, not Utf8: storage's string columns are Utf8View.
             (ScalarValue::Utf8("AIR".into()), DataType::Utf8View),
         ];
         for (value, expected) in cases {
