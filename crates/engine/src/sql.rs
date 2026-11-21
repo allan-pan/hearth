@@ -240,9 +240,9 @@ fn check_wildcard_options(options: WildcardAdditionalOptions) -> EngineResult<()
 fn output_name(expr: &Expr) -> String {
     match expr {
         Expr::Column { name, .. } => name.clone(),
+        _ => expr.to_string(),
     }
 }
-
 fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
     match expr {
         ast::Expr::Identifier(ident) => bind_column(&ident, input),

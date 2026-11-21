@@ -8,11 +8,22 @@ use storage::table::Snapshot;
 use crate::expr::Expr;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "constructed by the binder in step 2.2b")
+)]
 pub enum LogicalPlan {
-    Scan { table: String, snapshot: Snapshot },
+    Scan {
+        table: String,
+        snapshot: Snapshot,
+    },
     Project {
         input: Box<LogicalPlan>,
         exprs: Vec<(Expr, String)>,
+    },
+    Filter {
+        input: Box<LogicalPlan>,
+        predicate: Expr,
     },
 }
 
@@ -20,6 +31,7 @@ impl LogicalPlan {
     pub fn schema(&self) -> SchemaRef {
         match self {
             LogicalPlan::Scan { snapshot, .. } => snapshot.schema.clone(),
+            LogicalPlan::Filter { input, .. } => input.schema(),
             LogicalPlan::Project { input, exprs } => {
                 let input = input.schema();
                 let fields: Vec<Field> = exprs
@@ -39,6 +51,10 @@ impl LogicalPlan {
         write!(f, "{:indent$}", "", indent = depth * 2)?;
         match self {
             LogicalPlan::Scan { table, .. } => writeln!(f, "Scan: {table}"),
+            LogicalPlan::Filter { input, predicate } => {
+                writeln!(f, "Filter: {predicate}")?;
+                input.fmt_indented(f, depth + 1)
+            }
             LogicalPlan::Project { input, exprs } => {
                 write!(f, "Project: ")?;
                 for (i, (expr, alias)) in exprs.iter().enumerate() {
@@ -69,6 +85,7 @@ mod tests {
     use arrow::datatypes::DataType;
 
     use super::*;
+    use crate::expr::{BinaryOp, ScalarValue};
 
     fn people() -> LogicalPlan {
         let schema = Arc::new(Schema::new(vec![
@@ -125,6 +142,35 @@ mod tests {
         let schema = people().schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["id", "name"]);
+    }
+
+    /// `people WHERE id = 1`
+    fn id_is_one() -> LogicalPlan {
+        LogicalPlan::Filter {
+            input: Box::new(people()),
+            predicate: Expr::Binary {
+                left: Box::new(column(0, "id")),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Int64(1))),
+            },
+        }
+    }
+
+    #[test]
+    fn display_puts_each_node_above_its_input() {
+        let plan = LogicalPlan::Project {
+            input: Box::new(id_is_one()),
+            exprs: vec![(column(1, "name"), "name".into())],
+        };
+        assert_eq!(
+            plan.to_string(),
+            "Project: #1 name\n  Filter: #0 id = 1\n    Scan: people\n"
+        );
+    }
+
+    #[test]
+    fn filter_schema_is_its_input_schema() {
+        assert_eq!(id_is_one().schema(), people().schema());
     }
 
     #[test]
