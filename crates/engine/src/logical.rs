@@ -8,10 +8,6 @@ use storage::table::Snapshot;
 use crate::expr::Expr;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "constructed by the binder in step 2.2b")
-)]
 pub enum LogicalPlan {
     Scan {
         table: String,

@@ -4,10 +4,6 @@ use std::fmt;
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, Schema};
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "constructed by the binder in step 2.2b")
-)]
 pub enum Expr {
     /// `name` is only for display.
     Column {
@@ -98,10 +94,6 @@ impl fmt::Display for Expr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "constructed by the binder in step 2.2b")
-)]
 pub enum BinaryOp {
     Eq,
     NotEq,
@@ -163,7 +155,7 @@ fn fmt_unary_input(f: &mut fmt::Formatter<'_>, input: &Expr) -> fmt::Result {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "becomes Expr::Literal in step 2.2")
+    expect(dead_code, reason = "not every literal type is bound yet")
 )]
 pub enum ScalarValue {
     Boolean(bool),
