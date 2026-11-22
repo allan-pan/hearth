@@ -329,6 +329,72 @@ impl fmt::Display for ScalarValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "aggregates are not bound yet"))]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Min,
+    Max,
+    Avg,
+}
+
+impl fmt::Display for AggFunc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AggFunc::Count => write!(f, "COUNT"),
+            AggFunc::Sum => write!(f, "SUM"),
+            AggFunc::Min => write!(f, "MIN"),
+            AggFunc::Max => write!(f, "MAX"),
+            AggFunc::Avg => write!(f, "AVG"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "aggregates are not bound yet"))]
+pub enum AggExpr {
+    CountAll,
+    Call { func: AggFunc, expr: Expr },
+}
+
+impl AggExpr {
+    pub fn data_type(&self, input: &Schema) -> DataType {
+        match self {
+            AggExpr::CountAll => DataType::Int64,
+            AggExpr::Call { func, expr } => match func {
+                AggFunc::Count => DataType::Int64,
+                AggFunc::Sum => match expr.data_type(input) {
+                    DataType::Int32 | DataType::Int64 => DataType::Int64,
+                    DataType::Decimal128(_, scale) => DataType::Decimal128(38, scale),
+                    other => unreachable!("the binder never builds SUM over {other}"),
+                },
+                AggFunc::Avg => DataType::Float64,
+                AggFunc::Max | AggFunc::Min => expr.data_type(input),
+            },
+        }
+    }
+    /// Counts are never NULL. The others are NULL over zero rows, whatever their input.
+    pub fn nullable(&self) -> bool {
+        !matches!(
+            self,
+            AggExpr::CountAll
+                | AggExpr::Call {
+                    func: AggFunc::Count,
+                    ..
+                }
+        )
+    }
+}
+impl fmt::Display for AggExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AggExpr::CountAll => write!(f, "COUNT(*)"),
+            AggExpr::Call { func, expr } => write!(f, "{func}({expr})"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::Field;
@@ -888,5 +954,98 @@ mod tests {
             );
         }
         assert_eq!(ScalarValue::Date32(0).cast_to(&DataType::Utf8View), None);
+    }
+
+    fn agg(func: AggFunc, expr: Expr) -> AggExpr {
+        AggExpr::Call { func, expr }
+    }
+
+    #[test]
+    fn aggregate_display() {
+        assert_eq!(AggExpr::CountAll.to_string(), "COUNT(*)");
+        let cases = [
+            (AggFunc::Count, "COUNT"),
+            (AggFunc::Sum, "SUM"),
+            (AggFunc::Min, "MIN"),
+            (AggFunc::Max, "MAX"),
+            (AggFunc::Avg, "AVG"),
+        ];
+        for (func, sql) in cases {
+            assert_eq!(agg(func, id()).to_string(), format!("{sql}(#0 id)"));
+        }
+        let id_plus_1 = bin(id(), BinaryOp::Add, int(1));
+        assert_eq!(agg(AggFunc::Sum, id_plus_1).to_string(), "SUM(#0 id + 1)");
+    }
+
+    #[test]
+    fn count_is_int64() {
+        let schema = numbers();
+        assert_eq!(AggExpr::CountAll.data_type(&schema), DataType::Int64);
+        assert_eq!(
+            agg(AggFunc::Count, num(0)).data_type(&schema),
+            DataType::Int64
+        );
+    }
+
+    #[test]
+    fn sum_of_integers_is_int64() {
+        let schema = numbers();
+        assert_eq!(
+            agg(AggFunc::Sum, num(3)).data_type(&schema),
+            DataType::Int64
+        );
+        assert_eq!(
+            agg(AggFunc::Sum, num(4)).data_type(&schema),
+            DataType::Int64
+        );
+    }
+
+    #[test]
+    fn sum_of_decimals_keeps_the_scale_at_full_precision() {
+        let schema = numbers();
+        assert_eq!(
+            agg(AggFunc::Sum, num(0)).data_type(&schema),
+            DataType::Decimal128(38, 2)
+        );
+        assert_eq!(
+            agg(AggFunc::Sum, num(2)).data_type(&schema),
+            DataType::Decimal128(38, 4)
+        );
+    }
+
+    #[test]
+    fn min_and_max_keep_the_input_type() {
+        let schema = numbers();
+        for func in [AggFunc::Min, AggFunc::Max] {
+            assert_eq!(
+                agg(func, num(0)).data_type(&schema),
+                DataType::Decimal128(15, 2)
+            );
+            assert_eq!(agg(func, num(3)).data_type(&schema), DataType::Int32);
+        }
+        assert_eq!(
+            agg(AggFunc::Max, name()).data_type(&people()),
+            DataType::Utf8View
+        );
+    }
+
+    #[test]
+    fn avg_is_always_float64() {
+        let schema = numbers();
+        for column in [0, 2, 3, 4] {
+            assert_eq!(
+                agg(AggFunc::Avg, num(column)).data_type(&schema),
+                DataType::Float64
+            );
+        }
+    }
+
+    #[test]
+    fn counts_are_never_null_other_aggregates_always_can_be() {
+        assert!(!AggExpr::CountAll.nullable());
+        assert!(!agg(AggFunc::Count, num(1)).nullable());
+        for func in [AggFunc::Sum, AggFunc::Min, AggFunc::Max, AggFunc::Avg] {
+            assert!(agg(func, num(0)).nullable(), "{func}");
+        }
     }
 }
