@@ -59,8 +59,6 @@ fn run(snap: &Snapshot, column: &str, predicate: Predicate) -> Vec<i64> {
     values
 }
 
-/// Scans the `id` column and returns how many files planning skipped, then the matching ids in
-/// ascending order.
 fn skipped_and_ids(snap: &Snapshot, predicate: Predicate) -> (u64, Vec<i64>) {
     let stream = scan_batches(snap, "id", &predicate);
     let skipped = stream.pruning_report().files_skipped;
@@ -253,8 +251,6 @@ fn pruning_skips_files_outside_the_predicate() {
     assert_eq!(values, (100..110).collect::<Vec<i64>>());
 }
 
-/// Two files of `(id, day)`: ids 0..4 with days 100..103, and ids 10..14 with days 200..203.
-/// Day 201 (id 11) is NULL.
 fn dated() -> TestTable {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -281,8 +277,6 @@ fn dated() -> TestTable {
     )
 }
 
-/// Two files of `(id, price)` with `price: Decimal128(15, 2)`: ids 0..4 priced 0.01..0.04,
-/// and ids 10..14 priced 0.05, NULL, 0.07, 0.50.
 fn priced() -> TestTable {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -316,7 +310,6 @@ fn cents(value: i128) -> Literal {
 
 #[test]
 fn date_range_filters_rows_and_skips_file() {
-    // `day >= 202` drops the NULL day, and no day in file 1 can match.
     let t = dated();
     let p = Predicate::compare("day", CmpOp::Ge, Literal::Date32(202));
     assert_eq!(skipped_and_ids(&t.snapshot, p), (1, vec![12, 13]));
@@ -331,7 +324,6 @@ fn date_equality_matches_one_row() {
 
 #[test]
 fn decimal_range_filters_rows_and_skips_file() {
-    // Q6's discount filter: `price BETWEEN 0.05 AND 0.07`. The NULL price is dropped.
     let t = priced();
     let p = Predicate::And(vec![
         Predicate::compare("price", CmpOp::Ge, cents(5)),
@@ -342,8 +334,6 @@ fn decimal_range_filters_rows_and_skips_file() {
 
 #[test]
 fn decimal_literal_with_smaller_scale_is_rescaled() {
-    // 0.5 at scale 1 must match 0.50 at the column's scale 2. Without rescaling, the raw
-    // value 5 would match 0.05 (id 10) instead.
     let t = priced();
     let half = Literal::Decimal128 {
         value: 5,

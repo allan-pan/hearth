@@ -110,7 +110,6 @@ mod tests {
             Field::new("day", DataType::Date32, true),
             Field::new("price", DataType::Decimal128(15, 2), true),
         ]));
-        // The NULL sits between the min and max so a stat that counted it would be visible.
         let days = Arc::new(Date32Array::from(vec![Some(3), None, Some(1)])) as ArrayRef;
         let prices = Arc::new(
             Decimal128Array::from(vec![Some(250), None, Some(-125)])
@@ -125,7 +124,6 @@ mod tests {
         assert!(matches!(stats[0].max, Some(Literal::Date32(3))));
         assert_eq!(stats[0].null_count, 1);
 
-        // -1.25 and 2.50, with the column's precision and scale.
         assert!(matches!(
             stats[1].min,
             Some(Literal::Decimal128 {

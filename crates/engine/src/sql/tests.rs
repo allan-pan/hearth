@@ -529,3 +529,50 @@ fn integer_column_compared_with_a_fraction_becomes_decimal() {
         "CAST(#0 id AS Decimal128(20, 1)) = 1.5"
     );
 }
+
+#[test]
+fn negative_integer_literals() {
+    assert_eq!(filter_text("id = -1"), "#0 id = -1");
+    assert_eq!(filter_text("id in (-1, 2)"), "#0 id IN (-1, 2)");
+    assert_eq!(
+        items_predicate("qty > -1"),
+        binary(items_column(1), BinaryOp::Gt, lit(ScalarValue::Int32(-1)))
+    );
+}
+
+#[test]
+fn negative_decimal_literals() {
+    assert_eq!(
+        items_predicate("price > -1.5"),
+        binary(items_column(2), BinaryOp::Gt, lit(cents(-150, 15)))
+    );
+    assert_eq!(
+        items_filter_text("price between -0.07 and -0.05"),
+        "#2 price >= -0.07 AND #2 price <= -0.05"
+    );
+}
+
+#[test]
+fn minus_applied_twice_cancels_out() {
+    assert_eq!(filter_text("id = -(-1)"), "#0 id = 1");
+    assert_eq!(filter_text("id = - -1"), "#0 id = 1");
+}
+
+#[test]
+fn smallest_and_largest_negative_i64_literals() {
+    assert_eq!(
+        filter_text("id = -9223372036854775807"),
+        "#0 id = -9223372036854775807"
+    );
+    where_not_supported("id = -9223372036854775808");
+}
+
+#[test]
+fn minus_on_a_column_is_not_supported_yet() {
+    where_not_supported("-id = 1");
+}
+
+#[test]
+fn minus_on_a_string_is_a_bind_error() {
+    where_bind_error("name = -'a'");
+}

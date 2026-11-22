@@ -20,6 +20,41 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
             require_boolean(&expr, input, "NOT")?;
             Ok(Expr::Not(Box::new(expr)))
         }
+        ast::Expr::UnaryOp {
+            op: ast::UnaryOperator::Minus,
+            expr,
+        } => {
+            let expr = bind_expr(*expr, input)?;
+            let expr = match expr {
+                Expr::Literal(ScalarValue::Int64(n)) => {
+                    Expr::Literal(ScalarValue::Int64(n.checked_neg().ok_or_else(|| {
+                        EngineError::Bind(format!("integer literal {n} is too small to negate"))
+                    })?))
+                }
+                Expr::Literal(ScalarValue::Decimal128 {
+                    value,
+                    precision,
+                    scale,
+                }) => Expr::Literal(ScalarValue::Decimal128 {
+                    value: value.checked_neg().ok_or_else(|| {
+                        EngineError::Bind(format!("decimal literal {value} is too small to negate"))
+                    })?,
+                    precision,
+                    scale,
+                }),
+                Expr::Literal(other) => {
+                    return Err(EngineError::Bind(format!(
+                        "unary minus is only supported for numeric literals, got {other}"
+                    )));
+                }
+                other => {
+                    return Err(not_supported(&format!(
+                        "unary minus not supported yet for {other}"
+                    )));
+                }
+            };
+            Ok(expr)
+        }
         ast::Expr::IsNull(e) => {
             let e = bind_expr(*e, input)?;
             Ok(Expr::IsNull {

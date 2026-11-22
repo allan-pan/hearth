@@ -330,7 +330,6 @@ mod tests {
 
     #[test]
     fn compare_orders_decimals_with_same_scale() {
-        // 1.50 and 2.25 at scale 2.
         let (a, b) = (decimal(150, 15, 2), decimal(225, 15, 2));
         assert_eq!(a.compare(&b), Some(Ordering::Less));
         assert_eq!(a.compare(&a), Some(Ordering::Equal));
@@ -339,7 +338,6 @@ mod tests {
 
     #[test]
     fn compare_refuses_decimals_with_different_scales() {
-        // 1.5 and 1.50 are the same number. Comparing the raw values would say 15 < 150.
         let (a, b) = (decimal(15, 15, 1), decimal(150, 15, 2));
         assert_eq!(a.compare(&b), None);
         assert_eq!(b.compare(&a), None);
@@ -347,7 +345,6 @@ mod tests {
 
     #[test]
     fn compare_refuses_date_against_int32() {
-        // Both are i32 underneath, but they are different types.
         assert_eq!(Literal::Date32(1).compare(&Literal::Int32(1)), None);
     }
 
