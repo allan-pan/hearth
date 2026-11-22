@@ -6,6 +6,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::logical::LogicalPlan;
 
 mod bind_expr;
+mod coerce;
 mod from;
 mod projection;
 #[cfg(test)]
@@ -141,7 +142,6 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
     })
 }
 
-/// Unquoted names fold to lowercase; quoted names keep their case.
 fn normalize(ident: &Ident) -> String {
     match ident.quote_style {
         None => ident.value.to_lowercase(),

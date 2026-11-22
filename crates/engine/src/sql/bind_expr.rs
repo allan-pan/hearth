@@ -1,6 +1,7 @@
 use arrow::datatypes::{DataType, Schema};
 use sqlparser::ast::{self, Ident};
 
+use super::coerce::{coerce_list, coerce_pair};
 use super::{normalize, not_supported};
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{BinaryOp, Expr, ScalarValue};
@@ -44,9 +45,7 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
                 .into_iter()
                 .map(|item| bind_expr(item, input))
                 .collect::<EngineResult<Vec<_>>>()?;
-            for item in &items {
-                require_same_type(&expr, item, input, "IN")?;
-            }
+            let (expr, items) = coerce_list(expr, items, input)?;
             Ok(Expr::InList {
                 expr: Box::new(expr),
                 list: items,
@@ -79,15 +78,35 @@ fn bind_column(ident: &Ident, input: &Schema) -> EngineResult<Expr> {
 fn bind_literal(value: ast::Value) -> EngineResult<Expr> {
     match value {
         ast::Value::Number(s, _) => {
-            let n = s.parse::<i64>().map_err(|_| {
-                not_supported(&format!("the literal {s} (only integers are supported)"))
-            })?;
-            Ok(Expr::Literal(ScalarValue::Int64(n)))
+            let value = match s.parse::<i64>() {
+                Ok(n) => ScalarValue::Int64(n),
+                Err(_) => parse_decimal(&s)
+                    .ok_or_else(|| not_supported(&format!("the numeric literal {s}")))?,
+            };
+            Ok(Expr::Literal(value))
         }
         ast::Value::SingleQuotedString(s) => Ok(Expr::Literal(ScalarValue::Utf8(s))),
         ast::Value::Boolean(b) => Ok(Expr::Literal(ScalarValue::Boolean(b))),
         other => Err(not_supported(&format!("the literal {other}"))),
     }
+}
+
+fn parse_decimal(text: &str) -> Option<ScalarValue> {
+    let (integer, fraction) = text.split_once('.')?;
+    let is_digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if !is_digits(integer) || !is_digits(fraction) || integer.len() + fraction.len() == 0 {
+        return None;
+    }
+    let integer_digits = integer.trim_start_matches('0').len().max(1);
+    let precision = u8::try_from(integer_digits + fraction.len()).ok()?;
+    if precision > 38 {
+        return None;
+    }
+    Some(ScalarValue::Decimal128 {
+        value: format!("{integer}{fraction}").parse().ok()?,
+        precision,
+        scale: i8::try_from(fraction.len()).ok()?,
+    })
 }
 
 fn bind_binary(
@@ -109,32 +128,19 @@ fn bind_binary(
         ast::BinaryOperator::Or => BinaryOp::Or,
         other => return Err(not_supported(&format!("the binary operator {other}"))),
     };
-    match op {
+    let (left, right) = match op {
         BinaryOp::And | BinaryOp::Or => {
             require_boolean(&left, input, &op.to_string())?;
             require_boolean(&right, input, &op.to_string())?;
+            (left, right)
         }
-        _ => {
-            require_same_type(&left, &right, input, &op.to_string())?;
-        }
-    }
+        _ => coerce_pair(left, right, input)?,
+    };
     Ok(Expr::Binary {
         left: Box::new(left),
         op,
         right: Box::new(right),
     })
-}
-
-fn require_same_type(left: &Expr, right: &Expr, input: &Schema, context: &str) -> EngineResult<()> {
-    let l = left.data_type(input);
-    let r = right.data_type(input);
-    if l != r {
-        Err(not_supported(&format!(
-            "the {context} comparison between two different types unsupported, got {left} of type {l} and {right} of type {r}"
-        )))
-    } else {
-        Ok(())
-    }
 }
 
 fn bind_between(
@@ -147,8 +153,8 @@ fn bind_between(
     let expr = bind_expr(expr, input)?;
     let low = bind_expr(low, input)?;
     let high = bind_expr(high, input)?;
-    require_same_type(&expr, &low, input, "BETWEEN")?;
-    require_same_type(&expr, &high, input, "BETWEEN")?;
+    let (expr, bounds) = coerce_list(expr, vec![low, high], input)?;
+    let [low, high] = <[Expr; 2]>::try_from(bounds).expect("coerce_list keeps the item count");
     let (low_op, join_op, high_op) = if negated {
         (BinaryOp::Lt, BinaryOp::Or, BinaryOp::Gt)
     } else {
@@ -178,5 +184,51 @@ pub(super) fn require_boolean(expr: &Expr, schema: &Schema, clause: &str) -> Eng
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decimal(value: i128, precision: u8, scale: i8) -> Option<ScalarValue> {
+        Some(ScalarValue::Decimal128 {
+            value,
+            precision,
+            scale,
+        })
+    }
+
+    #[test]
+    fn parses_decimal_literals() {
+        let cases = [
+            ("0.05", decimal(5, 3, 2)),
+            ("12.34", decimal(1234, 4, 2)),
+            ("1.50", decimal(150, 3, 2)),
+            (".5", decimal(5, 2, 1)),
+            ("5.", decimal(5, 1, 0)),
+            ("007.5", decimal(75, 2, 1)),
+            ("0.0", decimal(0, 2, 1)),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(parse_decimal(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn decimal_literal_precision_is_limited_to_38_digits() {
+        let fraction = "1".repeat(37);
+        assert_eq!(
+            parse_decimal(&format!("1.{fraction}")).map(|v| v.data_type()),
+            Some(DataType::Decimal128(38, 37))
+        );
+        assert_eq!(parse_decimal(&format!("12.{fraction}")), None);
+    }
+
+    #[test]
+    fn rejects_text_that_is_not_a_plain_decimal() {
+        for text in ["1", "1e3", "1.5e2", "1.2.3", ".", "-1.5", "1.a", ""] {
+            assert_eq!(parse_decimal(text), None, "{text:?}");
+        }
     }
 }

@@ -7,21 +7,33 @@ use storage::table::Snapshot;
 
 use super::*;
 use crate::catalog::MemoryCatalog;
+use crate::expr::{BinaryOp, Expr, ScalarValue};
 
-/// Binds `sql` against a catalog holding `people(id Int64, name Utf8View)`.
+fn table(fields: Vec<Field>) -> Snapshot {
+    Snapshot {
+        version: 0,
+        files: vec![],
+        schema: Arc::new(Schema::new(fields)),
+    }
+}
+
+/// Tables: `people(id, name)` and `items(id, qty Int32, price Decimal128(15, 2))`.
 fn bind_sql(sql: &str) -> EngineResult<LogicalPlan> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("name", DataType::Utf8View, true),
-    ]));
     let mut catalog = MemoryCatalog::new();
     catalog.register(
         "people",
-        Snapshot {
-            version: 0,
-            files: vec![],
-            schema,
-        },
+        table(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8View, true),
+        ]),
+    );
+    catalog.register(
+        "items",
+        table(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("qty", DataType::Int32, false),
+            Field::new("price", DataType::Decimal128(15, 2), false),
+        ]),
     );
     let statements = Parser::parse_sql(&GenericDialect {}, sql).unwrap();
     bind(statements, &catalog)
@@ -151,8 +163,6 @@ fn only_a_single_query_statement_is_accepted() {
     assert!(not_supported_message("delete from people").contains("other than SELECT"));
 }
 
-/// The plan text of `select name from people where <predicate>`, without the projection
-/// and scan lines.
 fn filter_text(predicate: &str) -> String {
     let plan = plan_text(&format!("select name from people where {predicate}"));
     let filter = plan
@@ -176,7 +186,6 @@ fn where_bind_error(predicate: &str) -> String {
 
 #[test]
 fn where_becomes_a_filter_between_scan_and_project() {
-    // `id` is filtered on but not selected, so the filter must sit below the projection.
     assert_eq!(
         plan_text("select name from people where id = 1"),
         "Project: #1 name\n  Filter: #0 id = 1\n    Scan: people\n"
@@ -209,7 +218,6 @@ fn binds_string_and_boolean_literals() {
 
 #[test]
 fn and_or_keep_sql_precedence() {
-    // AND binds tighter than OR, so no parentheses are needed or added.
     assert_eq!(
         filter_text("id = 1 or id = 2 and id = 3"),
         "#0 id = 1 OR #0 id = 2 AND #0 id = 3"
@@ -228,7 +236,6 @@ fn redundant_parentheses_disappear() {
 
 #[test]
 fn binds_not() {
-    // NOT binds more loosely than `=`, so both spellings are NOT applied to the comparison.
     assert_eq!(filter_text("not id = 1"), "NOT (#0 id = 1)");
     assert_eq!(filter_text("not (id = 1)"), "NOT (#0 id = 1)");
 }
@@ -264,7 +271,6 @@ fn not_between_becomes_an_or_storage_can_prune() {
 
 #[test]
 fn between_inside_and_keeps_its_meaning() {
-    // NOT BETWEEN's OR must stay grouped when it sits under an AND.
     assert_eq!(
         filter_text("id not between 5 and 7 and name is null"),
         "(#0 id < 5 OR #0 id > 7) AND #1 name IS NULL"
@@ -286,19 +292,18 @@ fn logical_operators_need_boolean_operands() {
 }
 
 #[test]
-fn comparing_different_types_is_not_supported_yet() {
-    where_not_supported("name = 1");
-    where_not_supported("id = 'a'");
-    where_not_supported("id in (1, 'a')");
-    where_not_supported("id between 1 and 'z'");
+fn comparing_incompatible_types_is_a_bind_error() {
+    where_bind_error("name = 1");
+    where_bind_error("id = 'a'");
+    where_bind_error("id in (1, 'a')");
+    where_bind_error("id between 1 and 'z'");
+    where_bind_error("id = true");
 }
 
 #[test]
 fn unsupported_literals_are_rejected() {
-    where_not_supported("id = 1.5");
     where_not_supported("id = 1e3");
     where_not_supported("name = null");
-    // Larger than i64::MAX.
     where_not_supported("id = 99999999999999999999");
 }
 
@@ -313,4 +318,214 @@ fn unsupported_predicates_are_rejected() {
 #[test]
 fn unknown_column_in_where_is_a_bind_error() {
     assert!(where_bind_error("nme = 'bob'").contains("nme"));
+}
+
+fn items_column(index: usize) -> Expr {
+    let name = ["id", "qty", "price"][index];
+    Expr::Column {
+        index,
+        name: name.into(),
+    }
+}
+
+fn lit(value: ScalarValue) -> Expr {
+    Expr::Literal(value)
+}
+
+fn cents(value: i128, precision: u8) -> ScalarValue {
+    ScalarValue::Decimal128 {
+        value,
+        precision,
+        scale: 2,
+    }
+}
+
+fn cast(expr: Expr, to: DataType) -> Expr {
+    Expr::Cast {
+        expr: Box::new(expr),
+        to,
+    }
+}
+
+fn binary(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+    Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
+fn items_predicate(predicate: &str) -> Expr {
+    let sql = format!("select id from items where {predicate}");
+    match bind_sql(&sql).unwrap() {
+        LogicalPlan::Project { input, .. } => match *input {
+            LogicalPlan::Filter { predicate, .. } => predicate,
+            other => panic!("expected a Filter under the Project, got:\n{other}"),
+        },
+        other => panic!("expected a Project, got:\n{other}"),
+    }
+}
+
+fn items_filter_text(predicate: &str) -> String {
+    items_predicate(predicate).to_string()
+}
+
+#[test]
+fn integer_literal_takes_the_type_of_an_int32_column() {
+    let qty = items_column(1);
+    assert_eq!(
+        items_predicate("qty = 1"),
+        binary(qty.clone(), BinaryOp::Eq, lit(ScalarValue::Int32(1)))
+    );
+    assert_eq!(
+        items_predicate("1 = qty"),
+        binary(lit(ScalarValue::Int32(1)), BinaryOp::Eq, qty)
+    );
+}
+
+#[test]
+fn integer_literal_takes_the_type_of_a_decimal_column() {
+    assert_eq!(
+        items_predicate("price < 24"),
+        binary(items_column(2), BinaryOp::Lt, lit(cents(2400, 15)))
+    );
+    assert_eq!(items_filter_text("price < 24"), "#2 price < 24.00");
+}
+
+#[test]
+fn literal_too_large_for_the_column_widens_the_column_instead() {
+    assert_eq!(
+        items_predicate("qty = 5000000000"),
+        binary(
+            cast(items_column(1), DataType::Int64),
+            BinaryOp::Eq,
+            lit(ScalarValue::Int64(5_000_000_000)),
+        )
+    );
+    let common = DataType::Decimal128(21, 2);
+    assert_eq!(
+        items_predicate("price = 99999999999999999"),
+        binary(
+            cast(items_column(2), common.clone()),
+            BinaryOp::Eq,
+            lit(cents(9_999_999_999_999_999_900, 21)),
+        )
+    );
+}
+
+#[test]
+fn columns_of_different_types_are_cast_to_their_common_type() {
+    let (id, qty, price) = (items_column(0), items_column(1), items_column(2));
+    assert_eq!(
+        items_predicate("qty = id"),
+        binary(cast(qty.clone(), DataType::Int64), BinaryOp::Eq, id.clone())
+    );
+    assert_eq!(
+        items_predicate("id = qty"),
+        binary(id.clone(), BinaryOp::Eq, cast(qty.clone(), DataType::Int64))
+    );
+    assert_eq!(
+        items_predicate("qty = price"),
+        binary(
+            cast(qty, DataType::Decimal128(15, 2)),
+            BinaryOp::Eq,
+            price.clone()
+        )
+    );
+    let common = DataType::Decimal128(21, 2);
+    assert_eq!(
+        items_predicate("id = price"),
+        binary(cast(id, common.clone()), BinaryOp::Eq, cast(price, common))
+    );
+}
+
+#[test]
+fn cast_shows_in_plan_text() {
+    assert_eq!(
+        items_filter_text("qty = id"),
+        "CAST(#1 qty AS Int64) = #0 id"
+    );
+}
+
+#[test]
+fn in_list_literals_take_the_column_type() {
+    assert_eq!(
+        items_predicate("qty in (1, 2)"),
+        Expr::InList {
+            expr: Box::new(items_column(1)),
+            list: vec![lit(ScalarValue::Int32(1)), lit(ScalarValue::Int32(2))],
+            negated: false,
+        }
+    );
+}
+
+#[test]
+fn in_list_with_a_literal_too_large_widens_the_column() {
+    assert_eq!(
+        items_predicate("qty in (1, 5000000000)"),
+        Expr::InList {
+            expr: Box::new(cast(items_column(1), DataType::Int64)),
+            list: vec![
+                lit(ScalarValue::Int64(1)),
+                lit(ScalarValue::Int64(5_000_000_000)),
+            ],
+            negated: false,
+        }
+    );
+}
+
+#[test]
+fn between_bounds_take_the_column_type() {
+    assert_eq!(
+        items_filter_text("price between 1 and 2"),
+        "#2 price >= 1.00 AND #2 price <= 2.00"
+    );
+}
+
+#[test]
+fn incompatible_types_on_other_tables_are_bind_errors() {
+    for predicate in ["qty = true", "price = 'a'", "qty in (1, 'a')"] {
+        bind_error_message(&format!("select id from items where {predicate}"));
+    }
+}
+
+#[test]
+fn decimal_literals_take_the_column_scale() {
+    assert_eq!(
+        items_filter_text("price between 0.05 and 0.07"),
+        "#2 price >= 0.05 AND #2 price <= 0.07"
+    );
+    assert_eq!(
+        items_predicate("price = 1.5"),
+        binary(items_column(2), BinaryOp::Eq, lit(cents(150, 15)))
+    );
+}
+
+#[test]
+fn decimal_literal_with_more_digits_than_the_column_is_not_rounded() {
+    let common = DataType::Decimal128(16, 3);
+    assert_eq!(
+        items_predicate("price = 0.065"),
+        binary(
+            cast(items_column(2), common.clone()),
+            BinaryOp::Eq,
+            lit(ScalarValue::Decimal128 {
+                value: 65,
+                precision: 16,
+                scale: 3,
+            }),
+        )
+    );
+}
+
+#[test]
+fn integer_column_compared_with_a_fraction_becomes_decimal() {
+    assert_eq!(
+        items_filter_text("qty < 2.5"),
+        "CAST(#1 qty AS Decimal128(11, 1)) < 2.5"
+    );
+    assert_eq!(
+        items_filter_text("id = 1.5"),
+        "CAST(#0 id AS Decimal128(20, 1)) = 1.5"
+    );
 }

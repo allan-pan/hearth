@@ -105,7 +105,6 @@ mod tests {
         }
     }
 
-    /// `select name, id from people`
     fn name_then_id() -> LogicalPlan {
         LogicalPlan::Project {
             input: Box::new(people()),
@@ -140,7 +139,6 @@ mod tests {
         assert_eq!(names, ["id", "name"]);
     }
 
-    /// `people WHERE id = 1`
     fn id_is_one() -> LogicalPlan {
         LogicalPlan::Filter {
             input: Box::new(people()),

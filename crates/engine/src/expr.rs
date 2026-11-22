@@ -5,7 +5,6 @@ use arrow::datatypes::{DataType, Decimal128Type, DecimalType, Schema};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// `name` is only for display.
     Column {
         index: usize,
         name: String,
@@ -26,6 +25,10 @@ pub enum Expr {
         list: Vec<Expr>,
         negated: bool,
     },
+    Cast {
+        expr: Box<Expr>,
+        to: DataType,
+    },
 }
 
 impl Expr {
@@ -33,6 +36,7 @@ impl Expr {
         match self {
             Expr::Column { index, .. } => input.field(*index).data_type().clone(),
             Expr::Literal(v) => v.data_type(),
+            Expr::Cast { to, .. } => to.clone(),
             Expr::Binary { .. } | Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => {
                 DataType::Boolean
             }
@@ -49,6 +53,7 @@ impl Expr {
             Expr::InList { expr, list, .. } => {
                 expr.nullable(input) || list.iter().any(|e| e.nullable(input))
             }
+            Expr::Cast { expr, .. } => expr.nullable(input),
         }
     }
 }
@@ -73,6 +78,7 @@ impl fmt::Display for Expr {
                 let not = if *negated { " NOT" } else { "" };
                 write!(f, " IS{not} NULL")
             }
+            Expr::Cast { expr, to } => write!(f, "CAST({expr} AS {to})"),
             Expr::InList {
                 expr,
                 list,
@@ -135,8 +141,6 @@ impl fmt::Display for BinaryOp {
     }
 }
 
-/// Writes one side of a binary operator, in parentheses if it binds more loosely than the
-/// operator.
 fn fmt_operand(f: &mut fmt::Formatter<'_>, child: &Expr, parent: u8) -> fmt::Result {
     match child {
         Expr::Binary { op, .. } if op.precedence() < parent => write!(f, "({child})"),
@@ -144,7 +148,6 @@ fn fmt_operand(f: &mut fmt::Formatter<'_>, child: &Expr, parent: u8) -> fmt::Res
     }
 }
 
-/// Writes the input of NOT, IS NULL or IN, in parentheses if it is a binary operator.
 fn fmt_unary_input(f: &mut fmt::Formatter<'_>, input: &Expr) -> fmt::Result {
     match input {
         Expr::Binary { .. } => write!(f, "({input})"),
@@ -186,6 +189,48 @@ impl ScalarValue {
             ScalarValue::Utf8(_) => DataType::Utf8View,
         }
     }
+    pub fn cast_to(&self, to: &DataType) -> Option<ScalarValue> {
+        if self.data_type() == *to {
+            return Some(self.clone());
+        }
+        match (self, to) {
+            (ScalarValue::Int32(v), DataType::Int64) => Some(ScalarValue::Int64(i64::from(*v))),
+            (ScalarValue::Int64(v), DataType::Int32) => {
+                i32::try_from(*v).ok().map(ScalarValue::Int32)
+            }
+            (ScalarValue::Int32(v), DataType::Decimal128(precision, scale)) => {
+                to_decimal(i128::from(*v), 0, *precision, *scale)
+            }
+            (ScalarValue::Int64(v), DataType::Decimal128(precision, scale)) => {
+                to_decimal(i128::from(*v), 0, *precision, *scale)
+            }
+            (
+                ScalarValue::Decimal128 {
+                    value, scale: from, ..
+                },
+                DataType::Decimal128(precision, scale),
+            ) => to_decimal(*value, *from, *precision, *scale),
+            _ => None,
+        }
+    }
+}
+
+fn to_decimal(value: i128, from: i8, precision: u8, scale: i8) -> Option<ScalarValue> {
+    let diff = i32::from(scale) - i32::from(from);
+    let factor = 10i128.checked_pow(diff.unsigned_abs())?;
+    let value = if diff >= 0 {
+        value.checked_mul(factor)?
+    } else if value % factor == 0 {
+        value / factor
+    } else {
+        return None;
+    };
+    let limit = 10u128.checked_pow(u32::from(precision))?;
+    (value.unsigned_abs() < limit).then_some(ScalarValue::Decimal128 {
+        value,
+        precision,
+        scale,
+    })
 }
 
 impl fmt::Display for ScalarValue {
@@ -291,7 +336,6 @@ mod tests {
         assert_eq!(name.to_string(), "#1 name");
     }
 
-    /// `id Int64 NOT NULL, name Utf8View NULL, active Boolean NOT NULL`
     fn people() -> Schema {
         Schema::new(vec![
             Field::new("id", DataType::Int64, false),
@@ -439,7 +483,6 @@ mod tests {
 
     #[test]
     fn and_chain_needs_no_parentheses() {
-        // ((id = 1 AND id = 2) AND id = 3), as the parser builds it.
         let chain = bin(
             bin(id_eq(1), BinaryOp::And, id_eq(2)),
             BinaryOp::And,
@@ -476,7 +519,6 @@ mod tests {
 
     #[test]
     fn postfix_tests_parenthesize_a_binary_input() {
-        // Without the parentheses this would read back as `#0 id = (1 IS NULL)`.
         assert_eq!(is_null(id_eq(1), false).to_string(), "(#0 id = 1) IS NULL");
         let in_list = Expr::InList {
             expr: Box::new(bin(active(), BinaryOp::And, active())),
@@ -484,5 +526,153 @@ mod tests {
             negated: false,
         };
         assert_eq!(in_list.to_string(), "(#2 active AND #2 active) IN (true)");
+    }
+
+    fn cast(expr: Expr, to: DataType) -> Expr {
+        Expr::Cast {
+            expr: Box::new(expr),
+            to,
+        }
+    }
+
+    #[test]
+    fn cast_has_its_target_type_and_its_input_nullability() {
+        let schema = people();
+        let id_as_decimal = cast(id(), DataType::Decimal128(19, 0));
+        assert_eq!(
+            id_as_decimal.data_type(&schema),
+            DataType::Decimal128(19, 0)
+        );
+        assert!(!id_as_decimal.nullable(&schema));
+        assert!(cast(name(), DataType::Utf8View).nullable(&schema));
+    }
+
+    #[test]
+    fn cast_display_names_the_target_type() {
+        assert_eq!(
+            cast(id(), DataType::Decimal128(19, 0)).to_string(),
+            "CAST(#0 id AS Decimal128(19, 0))"
+        );
+    }
+
+    #[test]
+    fn cast_is_a_single_operand_for_parentheses() {
+        let expr = bin(cast(id(), DataType::Int64), BinaryOp::Eq, int(1));
+        assert_eq!(expr.to_string(), "CAST(#0 id AS Int64) = 1");
+        assert_eq!(
+            cast(id_eq(1), DataType::Boolean).to_string(),
+            "CAST(#0 id = 1 AS Boolean)"
+        );
+    }
+
+    fn dec(value: i128, precision: u8, scale: i8) -> ScalarValue {
+        ScalarValue::Decimal128 {
+            value,
+            precision,
+            scale,
+        }
+    }
+
+    #[test]
+    fn cast_to_same_type_is_unchanged() {
+        let values = [
+            ScalarValue::Int64(7),
+            ScalarValue::Utf8("a".into()),
+            ScalarValue::Boolean(true),
+            dec(5, 15, 2),
+        ];
+        for v in values {
+            assert_eq!(v.cast_to(&v.data_type()), Some(v.clone()), "{v}");
+        }
+    }
+
+    #[test]
+    fn cast_widens_int32_to_int64() {
+        assert_eq!(
+            ScalarValue::Int32(i32::MIN).cast_to(&DataType::Int64),
+            Some(ScalarValue::Int64(i32::MIN.into()))
+        );
+    }
+
+    #[test]
+    fn cast_narrows_int64_to_int32_only_when_it_fits() {
+        let to = DataType::Int32;
+        assert_eq!(
+            ScalarValue::Int64(i32::MAX.into()).cast_to(&to),
+            Some(ScalarValue::Int32(i32::MAX))
+        );
+        assert_eq!(
+            ScalarValue::Int64(i32::MIN.into()).cast_to(&to),
+            Some(ScalarValue::Int32(i32::MIN))
+        );
+        assert_eq!(
+            ScalarValue::Int64(i64::from(i32::MAX) + 1).cast_to(&to),
+            None
+        );
+        assert_eq!(
+            ScalarValue::Int64(i64::from(i32::MIN) - 1).cast_to(&to),
+            None
+        );
+    }
+
+    #[test]
+    fn cast_integer_to_decimal_scales_the_value() {
+        let to = DataType::Decimal128(15, 2);
+        assert_eq!(ScalarValue::Int64(24).cast_to(&to), Some(dec(2400, 15, 2)));
+        assert_eq!(ScalarValue::Int32(-3).cast_to(&to), Some(dec(-300, 15, 2)));
+        assert_eq!(ScalarValue::Int64(0).cast_to(&to), Some(dec(0, 15, 2)));
+    }
+
+    #[test]
+    fn cast_integer_to_decimal_checks_precision_at_the_boundary() {
+        let to = DataType::Decimal128(4, 2);
+        assert_eq!(ScalarValue::Int64(99).cast_to(&to), Some(dec(9900, 4, 2)));
+        assert_eq!(ScalarValue::Int64(-99).cast_to(&to), Some(dec(-9900, 4, 2)));
+        assert_eq!(ScalarValue::Int64(100).cast_to(&to), None);
+        assert_eq!(ScalarValue::Int64(-100).cast_to(&to), None);
+    }
+
+    #[test]
+    fn cast_integer_to_decimal_does_not_overflow() {
+        let to = DataType::Decimal128(38, 38);
+        assert_eq!(ScalarValue::Int64(i64::MAX).cast_to(&to), None);
+    }
+
+    #[test]
+    fn cast_decimal_to_decimal_rescales_exactly() {
+        assert_eq!(
+            dec(5, 2, 1).cast_to(&DataType::Decimal128(15, 2)),
+            Some(dec(50, 15, 2))
+        );
+        assert_eq!(
+            dec(60, 4, 3).cast_to(&DataType::Decimal128(15, 2)),
+            Some(dec(6, 15, 2))
+        );
+        assert_eq!(
+            dec(5, 3, 2).cast_to(&DataType::Decimal128(15, 2)),
+            Some(dec(5, 15, 2))
+        );
+    }
+
+    #[test]
+    fn cast_decimal_to_decimal_refuses_to_lose_digits_or_overflow() {
+        assert_eq!(dec(65, 4, 3).cast_to(&DataType::Decimal128(15, 2)), None);
+        assert_eq!(dec(12345, 15, 2).cast_to(&DataType::Decimal128(4, 2)), None);
+    }
+
+    #[test]
+    fn cast_refuses_unrelated_types() {
+        let cases = [
+            (ScalarValue::Utf8("1".into()), DataType::Int64),
+            (ScalarValue::Int64(1), DataType::Utf8View),
+            (ScalarValue::Boolean(true), DataType::Int64),
+            (ScalarValue::Int64(1), DataType::Boolean),
+            (ScalarValue::Int32(1), DataType::Date32),
+            (ScalarValue::Float64(1.0), DataType::Int64),
+            (dec(100, 15, 2), DataType::Int64),
+        ];
+        for (value, to) in cases {
+            assert_eq!(value.cast_to(&to), None, "{value} to {to}");
+        }
     }
 }
