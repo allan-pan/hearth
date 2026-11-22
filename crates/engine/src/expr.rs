@@ -37,9 +37,20 @@ impl Expr {
             Expr::Column { index, .. } => input.field(*index).data_type().clone(),
             Expr::Literal(v) => v.data_type(),
             Expr::Cast { to, .. } => to.clone(),
-            Expr::Binary { .. } | Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => {
-                DataType::Boolean
-            }
+            Expr::Binary { left, op, right } => match op {
+                BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq
+                | BinaryOp::And
+                | BinaryOp::Or => DataType::Boolean,
+                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
+                    arithmetic_type(*op, &left.data_type(input), &right.data_type(input))
+                }
+            },
+            Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => DataType::Boolean,
         }
     }
 
@@ -58,15 +69,40 @@ impl Expr {
     }
 }
 
+/// The type Arrow's arithmetic kernels return for these operands.
+fn arithmetic_type(op: BinaryOp, left: &DataType, right: &DataType) -> DataType {
+    match (left, right) {
+        (DataType::Int32, DataType::Int32) => DataType::Int32,
+        (DataType::Int64, DataType::Int64) => DataType::Int64,
+        (DataType::Decimal128(p1, s1), DataType::Decimal128(p2, s2)) => {
+            let (p1, s1, p2, s2) = (
+                i16::from(*p1),
+                i16::from(*s1),
+                i16::from(*p2),
+                i16::from(*s2),
+            );
+            let (precision, scale) = match op {
+                BinaryOp::Multiply => (p1 + p2 + 1, s1 + s2),
+                _ => {
+                    let scale = s1.max(s2);
+                    ((p1 - s1).max(p2 - s2) + scale + 1, scale)
+                }
+            };
+            DataType::Decimal128(precision.min(38) as u8, scale as i8)
+        }
+        _ => unreachable!("the binder never builds {left} {op} {right}"),
+    }
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Column { index, name } => write!(f, "#{index} {name}"),
 
             Expr::Binary { left, op, right } => {
-                fmt_operand(f, left, op.precedence())?;
+                fmt_operand(f, left, op.precedence(), false)?;
                 write!(f, " {op} ")?;
-                fmt_operand(f, right, op.precedence())
+                fmt_operand(f, right, op.precedence(), true)
             }
             Expr::Literal(v) => write!(f, "{v}"),
             Expr::Not(expr) => {
@@ -109,6 +145,9 @@ pub enum BinaryOp {
     GtEq,
     And,
     Or,
+    Add,
+    Subtract,
+    Multiply,
 }
 
 impl BinaryOp {
@@ -122,6 +161,8 @@ impl BinaryOp {
             | BinaryOp::LtEq
             | BinaryOp::Gt
             | BinaryOp::GtEq => 3,
+            BinaryOp::Add | BinaryOp::Subtract => 4,
+            BinaryOp::Multiply => 5,
         }
     }
 }
@@ -137,13 +178,25 @@ impl fmt::Display for BinaryOp {
             BinaryOp::GtEq => write!(f, ">="),
             BinaryOp::And => write!(f, "AND"),
             BinaryOp::Or => write!(f, "OR"),
+            BinaryOp::Add => write!(f, "+"),
+            BinaryOp::Subtract => write!(f, "-"),
+            BinaryOp::Multiply => write!(f, "*"),
         }
     }
 }
 
-fn fmt_operand(f: &mut fmt::Formatter<'_>, child: &Expr, parent: u8) -> fmt::Result {
+fn fmt_operand(
+    f: &mut fmt::Formatter<'_>,
+    child: &Expr,
+    parent: u8,
+    right_side: bool,
+) -> fmt::Result {
     match child {
-        Expr::Binary { op, .. } if op.precedence() < parent => write!(f, "({child})"),
+        Expr::Binary { op, .. }
+            if op.precedence() < parent || (right_side && op.precedence() == parent) =>
+        {
+            write!(f, "({child})")
+        }
         _ => write!(f, "{child}"),
     }
 }
@@ -674,5 +727,126 @@ mod tests {
         for (value, to) in cases {
             assert_eq!(value.cast_to(&to), None, "{value} to {to}");
         }
+    }
+
+    /// `a Decimal128(15, 2)`, `b Decimal128(16, 2) NULL`, `c Decimal128(6, 4)`,
+    /// `i Int32`, `j Int64`.
+    fn numbers() -> Schema {
+        Schema::new(vec![
+            Field::new("a", DataType::Decimal128(15, 2), false),
+            Field::new("b", DataType::Decimal128(16, 2), true),
+            Field::new("c", DataType::Decimal128(6, 4), false),
+            Field::new("i", DataType::Int32, false),
+            Field::new("j", DataType::Int64, false),
+        ])
+    }
+
+    fn num(index: usize) -> Expr {
+        Expr::Column {
+            index,
+            name: ["a", "b", "c", "i", "j"][index].into(),
+        }
+    }
+
+    fn arithmetic_type(left: Expr, op: BinaryOp, right: Expr) -> DataType {
+        bin(left, op, right).data_type(&numbers())
+    }
+
+    #[test]
+    fn decimal_addition_keeps_the_larger_scale_and_adds_a_carry_digit() {
+        for op in [BinaryOp::Add, BinaryOp::Subtract] {
+            assert_eq!(
+                arithmetic_type(num(0), op, num(1)),
+                DataType::Decimal128(17, 2)
+            );
+            assert_eq!(
+                arithmetic_type(num(0), op, num(2)),
+                DataType::Decimal128(18, 4)
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_multiplication_adds_scales_and_precisions() {
+        assert_eq!(
+            arithmetic_type(num(0), BinaryOp::Multiply, num(1)),
+            DataType::Decimal128(32, 4)
+        );
+    }
+
+    #[test]
+    fn decimal_precision_is_capped_at_38() {
+        let product = bin(num(0), BinaryOp::Multiply, num(1));
+        assert_eq!(
+            arithmetic_type(product, BinaryOp::Multiply, num(1)),
+            DataType::Decimal128(38, 6)
+        );
+    }
+
+    #[test]
+    fn integer_arithmetic_keeps_the_integer_type() {
+        assert_eq!(
+            arithmetic_type(num(3), BinaryOp::Add, num(3)),
+            DataType::Int32
+        );
+        assert_eq!(
+            arithmetic_type(num(4), BinaryOp::Multiply, num(4)),
+            DataType::Int64
+        );
+    }
+
+    #[test]
+    fn arithmetic_is_nullable_when_either_side_is() {
+        let schema = numbers();
+        assert!(!bin(num(0), BinaryOp::Add, num(2)).nullable(&schema));
+        assert!(bin(num(0), BinaryOp::Add, num(1)).nullable(&schema));
+    }
+
+    #[test]
+    fn display_of_arithmetic_operators() {
+        let cases = [
+            (BinaryOp::Add, "+"),
+            (BinaryOp::Subtract, "-"),
+            (BinaryOp::Multiply, "*"),
+        ];
+        for (op, sql) in cases {
+            assert_eq!(bin(id(), op, int(1)).to_string(), format!("#0 id {sql} 1"));
+        }
+    }
+
+    #[test]
+    fn multiplication_binds_tighter_than_addition() {
+        let id_times_2 = bin(id(), BinaryOp::Multiply, int(2));
+        assert_eq!(
+            bin(id(), BinaryOp::Add, id_times_2).to_string(),
+            "#0 id + #0 id * 2"
+        );
+        let id_plus_1 = bin(id(), BinaryOp::Add, int(1));
+        assert_eq!(
+            bin(id_plus_1, BinaryOp::Multiply, int(2)).to_string(),
+            "(#0 id + 1) * 2"
+        );
+    }
+
+    #[test]
+    fn arithmetic_binds_tighter_than_comparison() {
+        let id_plus_1 = bin(id(), BinaryOp::Add, int(1));
+        assert_eq!(
+            bin(id_plus_1, BinaryOp::Eq, int(2)).to_string(),
+            "#0 id + 1 = 2"
+        );
+    }
+
+    #[test]
+    fn right_operand_of_equal_precedence_keeps_its_parentheses() {
+        let id_minus_1 = || bin(id(), BinaryOp::Subtract, int(1));
+        assert_eq!(
+            bin(id(), BinaryOp::Subtract, id_minus_1()).to_string(),
+            "#0 id - (#0 id - 1)"
+        );
+        assert_eq!(
+            bin(id_minus_1(), BinaryOp::Subtract, int(2)).to_string(),
+            "#0 id - 1 - 2"
+        );
     }
 }

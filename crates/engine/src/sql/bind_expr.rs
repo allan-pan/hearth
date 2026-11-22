@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Schema};
 use sqlparser::ast::{self, Ident};
 
-use super::coerce::{coerce_list, coerce_pair};
+use super::coerce::{coerce_arithmetic, coerce_list, coerce_pair};
 use super::{normalize, not_supported};
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{BinaryOp, Expr, ScalarValue};
@@ -161,6 +161,9 @@ fn bind_binary(
         ast::BinaryOperator::GtEq => BinaryOp::GtEq,
         ast::BinaryOperator::And => BinaryOp::And,
         ast::BinaryOperator::Or => BinaryOp::Or,
+        ast::BinaryOperator::Plus => BinaryOp::Add,
+        ast::BinaryOperator::Minus => BinaryOp::Subtract,
+        ast::BinaryOperator::Multiply => BinaryOp::Multiply,
         other => return Err(not_supported(&format!("the binary operator {other}"))),
     };
     let (left, right) = match op {
@@ -168,6 +171,9 @@ fn bind_binary(
             require_boolean(&left, input, &op.to_string())?;
             require_boolean(&right, input, &op.to_string())?;
             (left, right)
+        }
+        BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
+            coerce_arithmetic(op, left, right, input)?
         }
         _ => coerce_pair(left, right, input)?,
     };

@@ -2,7 +2,7 @@
 use arrow::datatypes::{DataType, Schema};
 
 use crate::error::{EngineError, EngineResult};
-use crate::expr::Expr;
+use crate::expr::{BinaryOp, Expr, ScalarValue};
 
 pub(super) fn common_type(left: &DataType, right: &DataType) -> Option<DataType> {
     if left == right {
@@ -104,6 +104,60 @@ fn cannot_compare(left: &Expr, l: &DataType, right: &Expr, r: &DataType) -> Engi
     EngineError::Bind(format!(
         "cannot compare {left} of type {l} with {right} of type {r}"
     ))
+}
+
+/// Prepares the operands of `+`, `-` or `*` for Arrow's kernels, which need two integers of
+/// one type or two decimals. An integer next to a decimal becomes a decimal, as narrow as
+/// possible when it is a literal, since its precision feeds the result's.
+pub(super) fn coerce_arithmetic(
+    op: BinaryOp,
+    left: Expr,
+    right: Expr,
+    input: &Schema,
+) -> EngineResult<(Expr, Expr)> {
+    let (l, r) = (left.data_type(input), right.data_type(input));
+    if !is_numeric(&l) || !is_numeric(&r) {
+        return Err(EngineError::Bind(format!(
+            "{op} needs numbers, got {left} of type {l} and {right} of type {r}"
+        )));
+    }
+    let is_decimal = |t: &DataType| matches!(t, DataType::Decimal128(..));
+    match (is_decimal(&l), is_decimal(&r)) {
+        (false, false) => coerce_pair(left, right, input),
+        (true, true) => Ok((left, right)),
+        (false, true) => Ok((decimal_operand(left, &l), right)),
+        (true, false) => Ok((left, decimal_operand(right, &r))),
+    }
+}
+
+fn is_numeric(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int32 | DataType::Int64 | DataType::Decimal128(..)
+    )
+}
+
+fn decimal_operand(expr: Expr, integer_type: &DataType) -> Expr {
+    if let Expr::Literal(value) = &expr
+        && let Some(value) = narrowest_decimal(value)
+    {
+        return Expr::Literal(value);
+    }
+    let (precision, scale) = as_decimal(integer_type).expect("an integer type");
+    Expr::Cast {
+        expr: Box::new(expr),
+        to: DataType::Decimal128(precision, scale),
+    }
+}
+
+fn narrowest_decimal(value: &ScalarValue) -> Option<ScalarValue> {
+    let n = match value {
+        ScalarValue::Int32(n) => i128::from(*n),
+        ScalarValue::Int64(n) => i128::from(*n),
+        _ => return None,
+    };
+    let digits = n.unsigned_abs().checked_ilog10().map_or(1, |d| d + 1);
+    value.cast_to(&DataType::Decimal128(u8::try_from(digits).ok()?, 0))
 }
 
 #[cfg(test)]

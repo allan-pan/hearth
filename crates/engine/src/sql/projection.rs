@@ -14,8 +14,12 @@ pub(super) fn bind_projection(
     for item in projection {
         match item {
             SelectItem::UnnamedExpr(expr) => {
+                let text = expr.to_string();
                 let expr = bind_expr(expr, schema)?;
-                let name = output_name(&expr);
+                let name = match &expr {
+                    Expr::Column { name, .. } => name.clone(),
+                    _ => text,
+                };
                 exprs.push((expr, name));
             }
             SelectItem::ExprWithAlias { expr, alias } => {
@@ -59,11 +63,4 @@ fn check_wildcard_options(options: WildcardAdditionalOptions) -> EngineResult<()
         ("* AS", opt_alias.is_some()),
     ];
     reject_present(&unsupported)
-}
-
-fn output_name(expr: &Expr) -> String {
-    match expr {
-        Expr::Column { name, .. } => name.clone(),
-        _ => expr.to_string(),
-    }
 }
