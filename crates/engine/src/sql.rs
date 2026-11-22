@@ -7,6 +7,7 @@ use crate::logical::LogicalPlan;
 
 mod bind_expr;
 mod coerce;
+mod dates;
 mod from;
 mod projection;
 #[cfg(test)]

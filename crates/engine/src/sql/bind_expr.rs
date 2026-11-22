@@ -2,6 +2,7 @@ use arrow::datatypes::{DataType, Schema};
 use sqlparser::ast::{self, Ident};
 
 use super::coerce::{coerce_arithmetic, coerce_list, coerce_pair};
+use super::dates::fold_interval;
 use super::{normalize, not_supported};
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{BinaryOp, Expr, ScalarValue};
@@ -93,6 +94,18 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
             low,
             high,
         } => bind_between(*expr, negated, *low, *high, input),
+        ast::Expr::TypedString(ast::TypedString {
+            data_type,
+            value,
+            uses_odbc_syntax: _,
+        }) => match (data_type, value.value) {
+            (ast::DataType::Date, ast::Value::SingleQuotedString(text)) => {
+                let value = ScalarValue::parse_date(&text)
+                    .ok_or_else(|| EngineError::Bind(format!("invalid date literal '{text}'")))?;
+                Ok(Expr::Literal(value))
+            }
+            (other, _) => Err(not_supported(&format!("the typed string literal {other}"))),
+        },
         other => Err(not_supported(&format!("the expression {other}"))),
     }
 }
@@ -150,6 +163,21 @@ fn bind_binary(
     right: ast::Expr,
     input: &Schema,
 ) -> EngineResult<Expr> {
+    use ast::BinaryOperator::{Minus, Plus};
+    let (left, op, right) = match (left, op, right) {
+        (date, op @ (Plus | Minus), ast::Expr::Interval(interval)) => {
+            return fold_interval(date, op == Minus, interval, input);
+        }
+        (ast::Expr::Interval(interval), Plus, date) => {
+            return fold_interval(date, false, interval, input);
+        }
+        (ast::Expr::Interval(_), Minus, _) => {
+            return Err(EngineError::Bind(
+                "cannot subtract from an interval".to_string(),
+            ));
+        }
+        other => other,
+    };
     let left = bind_expr(left, input)?;
     let right = bind_expr(right, input)?;
     let op = match op {

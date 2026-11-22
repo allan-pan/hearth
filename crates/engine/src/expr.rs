@@ -2,6 +2,7 @@
 use std::fmt;
 
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, Schema};
+use chrono::{Datelike, NaiveDate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -263,9 +264,24 @@ impl ScalarValue {
                 },
                 DataType::Decimal128(precision, scale),
             ) => to_decimal(*value, *from, *precision, *scale),
+            (ScalarValue::Utf8(text), DataType::Date32) => ScalarValue::parse_date(text),
             _ => None,
         }
     }
+    pub fn parse_date(text: &str) -> Option<ScalarValue> {
+        let date = NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+        days_from_date(date).map(ScalarValue::Date32)
+    }
+}
+
+const UNIX_EPOCH_CE_DAYS: i32 = 719_163;
+
+pub fn date_from_days(days: i32) -> Option<NaiveDate> {
+    NaiveDate::from_num_days_from_ce_opt(days.checked_add(UNIX_EPOCH_CE_DAYS)?)
+}
+
+pub fn days_from_date(date: NaiveDate) -> Option<i32> {
+    date.num_days_from_ce().checked_sub(UNIX_EPOCH_CE_DAYS)
 }
 
 fn to_decimal(value: i128, from: i8, precision: u8, scale: i8) -> Option<ScalarValue> {
@@ -848,5 +864,29 @@ mod tests {
             bin(id_minus_1(), BinaryOp::Subtract, int(2)).to_string(),
             "#0 id - 1 - 2"
         );
+    }
+
+    #[test]
+    fn cast_parses_a_string_as_a_date() {
+        assert_eq!(
+            ScalarValue::Utf8("1994-01-01".into()).cast_to(&DataType::Date32),
+            Some(ScalarValue::Date32(8766))
+        );
+        assert_eq!(
+            ScalarValue::Utf8("1969-12-31".into()).cast_to(&DataType::Date32),
+            Some(ScalarValue::Date32(-1))
+        );
+    }
+
+    #[test]
+    fn cast_refuses_a_string_that_is_not_a_date() {
+        for text in ["1994-02-30", "1994-1-1x", "soon", ""] {
+            assert_eq!(
+                ScalarValue::Utf8(text.into()).cast_to(&DataType::Date32),
+                None,
+                "{text:?}"
+            );
+        }
+        assert_eq!(ScalarValue::Date32(0).cast_to(&DataType::Utf8View), None);
     }
 }
