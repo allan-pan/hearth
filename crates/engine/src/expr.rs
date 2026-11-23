@@ -9,7 +9,7 @@ mod agg;
 mod scalar;
 
 pub use agg::{AggExpr, AggFunc};
-pub use scalar::{ScalarValue, date_from_days, days_from_date};
+pub use scalar::ScalarValue;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {

@@ -1,11 +1,10 @@
-use arrow::datatypes::Schema;
-use chrono::{Days, Months, NaiveDate};
+use arrow::datatypes::{Date32Type, IntervalDayTimeType, Schema};
 use sqlparser::ast::{self, DateTimeField};
 
 use super::bind_expr::bind_expr;
 use super::not_supported;
 use crate::error::{EngineError, EngineResult};
-use crate::expr::{Expr, ScalarValue, date_from_days, days_from_date};
+use crate::expr::{Expr, ScalarValue};
 
 enum Unit {
     Day,
@@ -34,14 +33,15 @@ pub(super) fn fold_interval(
         Some(amount)
     };
     let shifted = amount
-        .zip(date_from_days(days))
-        .and_then(|(amount, date)| match unit {
-            Unit::Day => shift_days(date, amount),
-            Unit::Month => shift_months(date, amount),
+        .and_then(|amount| i32::try_from(amount).ok())
+        .and_then(|amount| match unit {
+            Unit::Day => {
+                Date32Type::add_day_time_opt(days, IntervalDayTimeType::make_value(amount, 0))
+            }
+            Unit::Month => Date32Type::add_year_months_opt(days, amount),
         });
-    let days = shifted
-        .and_then(days_from_date)
-        .ok_or_else(|| EngineError::Bind("date arithmetic is out of range".to_string()))?;
+    let days =
+        shifted.ok_or_else(|| EngineError::Bind("date arithmetic is out of range".to_string()))?;
     Ok(Expr::Literal(ScalarValue::Date32(days)))
 }
 
@@ -74,23 +74,5 @@ fn interval_amount(interval: ast::Interval) -> EngineResult<(i64, Unit)> {
             .map(|months| (months, Unit::Month))
             .ok_or_else(|| EngineError::Bind("date arithmetic is out of range".to_string())),
         _ => Err(unsupported()),
-    }
-}
-
-fn shift_days(date: NaiveDate, amount: i64) -> Option<NaiveDate> {
-    let days = Days::new(amount.unsigned_abs());
-    if amount >= 0 {
-        date.checked_add_days(days)
-    } else {
-        date.checked_sub_days(days)
-    }
-}
-
-fn shift_months(date: NaiveDate, amount: i64) -> Option<NaiveDate> {
-    let months = Months::new(u32::try_from(amount.unsigned_abs()).ok()?);
-    if amount >= 0 {
-        date.checked_add_months(months)
-    } else {
-        date.checked_sub_months(months)
     }
 }

@@ -153,3 +153,11 @@ fn limit_and_offset_must_be_non_negative_integers() {
 fn mysql_limit_with_a_comma_is_not_supported() {
     not_supported_message("select id from people limit 1, 2");
 }
+
+#[test]
+fn limit_by_is_not_supported() {
+    assert_eq!(
+        not_supported_message("select id from people limit 1 by id"),
+        "LIMIT BY is not supported yet"
+    );
+}

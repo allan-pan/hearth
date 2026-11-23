@@ -176,10 +176,13 @@ fn smallest_and_largest_negative_i64_literals() {
 
 #[test]
 fn minus_on_a_column_is_not_supported_yet() {
-    where_not_supported("-id = 1");
+    assert_eq!(
+        where_not_supported("-id = 1"),
+        "unary minus on #0 id is not supported yet"
+    );
 }
 
 #[test]
 fn minus_on_a_string_is_a_bind_error() {
-    where_bind_error("name = -'a'");
+    assert_eq!(where_bind_error("name = -'a'"), "cannot negate 'a'");
 }

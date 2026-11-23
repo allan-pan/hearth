@@ -25,52 +25,15 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
         ast::Expr::UnaryOp {
             op: ast::UnaryOperator::Minus,
             expr,
-        } => {
-            let expr = bind_expr(*expr, input)?;
-            let expr = match expr {
-                Expr::Literal(ScalarValue::Int64(n)) => {
-                    Expr::Literal(ScalarValue::Int64(n.checked_neg().ok_or_else(|| {
-                        EngineError::Bind(format!("integer literal {n} is too small to negate"))
-                    })?))
-                }
-                Expr::Literal(ScalarValue::Decimal128 {
-                    value,
-                    precision,
-                    scale,
-                }) => Expr::Literal(ScalarValue::Decimal128 {
-                    value: value.checked_neg().ok_or_else(|| {
-                        EngineError::Bind(format!("decimal literal {value} is too small to negate"))
-                    })?,
-                    precision,
-                    scale,
-                }),
-                Expr::Literal(other) => {
-                    return Err(EngineError::Bind(format!(
-                        "unary minus is only supported for numeric literals, got {other}"
-                    )));
-                }
-                other => {
-                    return Err(not_supported(&format!(
-                        "unary minus not supported yet for {other}"
-                    )));
-                }
-            };
-            Ok(expr)
-        }
-        ast::Expr::IsNull(e) => {
-            let e = bind_expr(*e, input)?;
-            Ok(Expr::IsNull {
-                expr: Box::new(e),
-                negated: false,
-            })
-        }
-        ast::Expr::IsNotNull(e) => {
-            let e = bind_expr(*e, input)?;
-            Ok(Expr::IsNull {
-                expr: Box::new(e),
-                negated: true,
-            })
-        }
+        } => match bind_expr(*expr, input)? {
+            Expr::Literal(value) => value
+                .checked_neg()
+                .map(Expr::Literal)
+                .ok_or_else(|| EngineError::Bind(format!("cannot negate {value}"))),
+            other => Err(not_supported(&format!("unary minus on {other}"))),
+        },
+        ast::Expr::IsNull(expr) => bind_is_null(*expr, false, input),
+        ast::Expr::IsNotNull(expr) => bind_is_null(*expr, true, input),
         ast::Expr::In {
             expr,
             target: ast::InTarget::List(items),
@@ -214,6 +177,13 @@ fn bind_binary(
         left: Box::new(left),
         op,
         right: Box::new(right),
+    })
+}
+
+fn bind_is_null(expr: ast::Expr, negated: bool, input: &Schema) -> EngineResult<Expr> {
+    Ok(Expr::IsNull {
+        expr: Box::new(bind_expr(expr, input)?),
+        negated,
     })
 }
 

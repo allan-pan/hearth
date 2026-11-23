@@ -84,8 +84,8 @@ pub(super) fn bind_limit(limit_clause: ast::LimitClause) -> EngineResult<(usize,
             limit_by,
         } => {
             if !limit_by.is_empty() {
-                return Err(not_supported("LIMIT BY is not supported"));
-            };
+                return Err(not_supported("LIMIT BY"));
+            }
             let fetch = limit.map(|limit| row_count(limit, "LIMIT")).transpose()?;
             let skip = match offset {
                 Some(offset) => row_count(offset.value, "OFFSET")?,

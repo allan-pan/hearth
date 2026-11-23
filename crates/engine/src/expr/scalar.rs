@@ -1,8 +1,8 @@
 //! Constant values and exact conversions between their types.
 use std::fmt;
 
-use arrow::datatypes::{DataType, Decimal128Type, DecimalType};
-use chrono::{Datelike, NaiveDate};
+use arrow::datatypes::{DataType, Date32Type, Decimal128Type, DecimalType};
+use chrono::NaiveDate;
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
@@ -65,18 +65,26 @@ impl ScalarValue {
     }
     pub fn parse_date(text: &str) -> Option<ScalarValue> {
         let date = NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
-        days_from_date(date).map(ScalarValue::Date32)
+        Some(ScalarValue::Date32(Date32Type::from_naive_date(date)))
     }
-}
 
-const UNIX_EPOCH_CE_DAYS: i32 = 719_163;
-
-pub fn date_from_days(days: i32) -> Option<NaiveDate> {
-    NaiveDate::from_num_days_from_ce_opt(days.checked_add(UNIX_EPOCH_CE_DAYS)?)
-}
-
-pub fn days_from_date(date: NaiveDate) -> Option<i32> {
-    date.num_days_from_ce().checked_sub(UNIX_EPOCH_CE_DAYS)
+    pub fn checked_neg(&self) -> Option<ScalarValue> {
+        match self {
+            ScalarValue::Int32(v) => v.checked_neg().map(ScalarValue::Int32),
+            ScalarValue::Int64(v) => v.checked_neg().map(ScalarValue::Int64),
+            ScalarValue::Float64(v) => Some(ScalarValue::Float64(-v)),
+            ScalarValue::Decimal128 {
+                value,
+                precision,
+                scale,
+            } => Some(ScalarValue::Decimal128 {
+                value: value.checked_neg()?,
+                precision: *precision,
+                scale: *scale,
+            }),
+            ScalarValue::Boolean(_) | ScalarValue::Date32(_) | ScalarValue::Utf8(_) => None,
+        }
+    }
 }
 
 fn to_decimal(value: i128, from: i8, precision: u8, scale: i8) -> Option<ScalarValue> {
@@ -113,12 +121,10 @@ impl fmt::Display for ScalarValue {
                 "{}",
                 Decimal128Type::format_decimal(*value, *precision, *scale)
             ),
-            ScalarValue::Date32(days) => {
-                match arrow::temporal_conversions::date32_to_datetime(*days) {
-                    Some(dt) => write!(f, "date '{}'", dt.format("%Y-%m-%d")),
-                    None => write!(f, "date({days} days)"),
-                }
-            }
+            ScalarValue::Date32(days) => match Date32Type::to_naive_date_opt(*days) {
+                Some(date) => write!(f, "date '{}'", date.format("%Y-%m-%d")),
+                None => write!(f, "date({days} days)"),
+            },
             ScalarValue::Utf8(v) => write!(f, "'{}'", v.replace('\'', "''")),
         }
     }
@@ -316,5 +322,33 @@ mod tests {
             );
         }
         assert_eq!(ScalarValue::Date32(0).cast_to(&DataType::Utf8View), None);
+    }
+
+    #[test]
+    fn checked_neg_negates_numbers() {
+        assert_eq!(
+            ScalarValue::Int32(i32::MAX).checked_neg(),
+            Some(ScalarValue::Int32(-i32::MAX))
+        );
+        assert_eq!(
+            ScalarValue::Int64(5).checked_neg(),
+            Some(ScalarValue::Int64(-5))
+        );
+        assert_eq!(dec(150, 15, 2).checked_neg(), Some(dec(-150, 15, 2)));
+    }
+
+    #[test]
+    fn checked_neg_refuses_overflow_and_non_numbers() {
+        let cases = [
+            ScalarValue::Int32(i32::MIN),
+            ScalarValue::Int64(i64::MIN),
+            dec(i128::MIN, 38, 0),
+            ScalarValue::Utf8("a".into()),
+            ScalarValue::Boolean(true),
+            ScalarValue::Date32(0),
+        ];
+        for value in cases {
+            assert_eq!(value.checked_neg(), None, "{value}");
+        }
     }
 }
