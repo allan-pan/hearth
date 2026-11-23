@@ -482,6 +482,27 @@ fn in_list_with_a_literal_too_large_widens_the_column() {
 }
 
 #[test]
+fn literal_probe_takes_the_type_of_its_list_or_bounds() {
+    let qty = items_column(1);
+    assert_eq!(
+        items_predicate("1 in (qty)"),
+        Expr::InList {
+            expr: Box::new(lit(ScalarValue::Int32(1))),
+            list: vec![qty.clone()],
+            negated: false,
+        }
+    );
+    assert_eq!(
+        items_filter_text("5 between qty and qty"),
+        "5 >= #1 qty AND 5 <= #1 qty"
+    );
+    assert_eq!(
+        items_predicate("5 between qty and qty"),
+        items_predicate("5 >= qty and 5 <= qty")
+    );
+}
+
+#[test]
 fn between_bounds_take_the_column_type() {
     assert_eq!(
         items_filter_text("price between 1 and 2"),

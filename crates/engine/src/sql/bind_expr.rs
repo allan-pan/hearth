@@ -2,7 +2,7 @@ use arrow::datatypes::{DataType, Schema};
 use sqlparser::ast::{self, Ident};
 
 use super::aggregate::{bind_aggregate, is_aggregate};
-use super::coerce::{coerce_arithmetic, coerce_list, coerce_pair};
+use super::coerce::{coerce_arithmetic, coerce_operands, coerce_pair};
 use super::dates::fold_interval;
 use super::{normalize, not_supported};
 use crate::error::{EngineError, EngineResult};
@@ -77,15 +77,15 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
             negated,
             global: false,
         } => {
-            let expr = bind_expr(*expr, input)?;
-            let items: Vec<Expr> = items
-                .into_iter()
-                .map(|item| bind_expr(item, input))
-                .collect::<EngineResult<Vec<_>>>()?;
-            let (expr, items) = coerce_list(expr, items, input)?;
+            let mut operands = vec![bind_expr(*expr, input)?];
+            for item in items {
+                operands.push(bind_expr(item, input)?);
+            }
+            let mut operands = coerce_operands(operands, input)?;
+            let expr = operands.remove(0);
             Ok(Expr::InList {
                 expr: Box::new(expr),
-                list: items,
+                list: operands,
                 negated,
             })
         }
@@ -224,11 +224,13 @@ fn bind_between(
     high: ast::Expr,
     input: &Schema,
 ) -> EngineResult<Expr> {
-    let expr = bind_expr(expr, input)?;
-    let low = bind_expr(low, input)?;
-    let high = bind_expr(high, input)?;
-    let (expr, bounds) = coerce_list(expr, vec![low, high], input)?;
-    let [low, high] = <[Expr; 2]>::try_from(bounds).expect("coerce_list keeps the item count");
+    let operands = vec![
+        bind_expr(expr, input)?,
+        bind_expr(low, input)?,
+        bind_expr(high, input)?,
+    ];
+    let [expr, low, high] = <[Expr; 3]>::try_from(coerce_operands(operands, input)?)
+        .expect("coerce_operands keeps the expression count");
     let (low_op, join_op, high_op) = if negated {
         (BinaryOp::Lt, BinaryOp::Or, BinaryOp::Gt)
     } else {

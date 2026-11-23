@@ -1,4 +1,4 @@
-//! Type coercion: converting the two sides of a comparison to one type.
+//! Type coercion: converting the operands of a comparison or arithmetic to types that fit.
 use arrow::datatypes::{DataType, Schema};
 
 use crate::error::{EngineError, EngineResult};
@@ -6,54 +6,40 @@ use crate::expr::{BinaryOp, Expr, ScalarValue};
 use crate::types::{as_decimal, common_type, is_numeric};
 
 pub(super) fn coerce_pair(left: Expr, right: Expr, input: &Schema) -> EngineResult<(Expr, Expr)> {
-    let (l, r) = (left.data_type(input), right.data_type(input));
-    if l == r {
-        return Ok((left, right));
-    }
-    if let Some(right) = literal_as(&right, &l) {
-        return Ok((left, right));
-    }
-    if let Some(left) = literal_as(&left, &r) {
-        return Ok((left, right));
-    }
-    let common = common_type(&l, &r).ok_or_else(|| cannot_compare(&left, &l, &right, &r))?;
-    Ok((convert(left, &l, &common), convert(right, &r, &common)))
+    let [left, right] = <[Expr; 2]>::try_from(coerce_operands(vec![left, right], input)?)
+        .expect("coerce_operands keeps the expression count");
+    Ok((left, right))
 }
 
-pub(super) fn coerce_list(
-    expr: Expr,
-    items: Vec<Expr>,
-    input: &Schema,
-) -> EngineResult<(Expr, Vec<Expr>)> {
-    let target = expr.data_type(input);
-    let fitted: Option<Vec<Expr>> = items
-        .iter()
-        .map(|item| {
-            if item.data_type(input) == target {
-                Some(item.clone())
-            } else {
-                literal_as(item, &target)
-            }
-        })
-        .collect();
-    if let Some(items) = fitted {
-        return Ok((expr, items));
+pub(super) fn coerce_operands(exprs: Vec<Expr>, input: &Schema) -> EngineResult<Vec<Expr>> {
+    let types: Vec<DataType> = exprs.iter().map(|expr| expr.data_type(input)).collect();
+    for target in &types {
+        let fitted: Option<Vec<Expr>> = exprs
+            .iter()
+            .zip(&types)
+            .map(|(expr, from)| {
+                if from == target {
+                    Some(expr.clone())
+                } else {
+                    literal_as(expr, target)
+                }
+            })
+            .collect();
+        if let Some(fitted) = fitted {
+            return Ok(fitted);
+        }
     }
 
-    let mut common = target.clone();
-    for item in &items {
-        let item_type = item.data_type(input);
-        common = common_type(&common, &item_type)
-            .ok_or_else(|| cannot_compare(&expr, &common, item, &item_type))?;
+    let mut common = types[0].clone();
+    for (expr, from) in exprs.iter().zip(&types).skip(1) {
+        common = common_type(&common, from)
+            .ok_or_else(|| cannot_compare(&exprs[0], &common, expr, from))?;
     }
-    let items = items
+    Ok(exprs
         .into_iter()
-        .map(|item| {
-            let from = item.data_type(input);
-            convert(item, &from, &common)
-        })
-        .collect();
-    Ok((convert(expr, &target, &common), items))
+        .zip(&types)
+        .map(|(expr, from)| convert(expr, from, &common))
+        .collect())
 }
 
 fn literal_as(expr: &Expr, to: &DataType) -> Option<Expr> {
