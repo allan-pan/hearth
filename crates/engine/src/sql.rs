@@ -10,6 +10,7 @@ mod bind_expr;
 mod coerce;
 mod dates;
 mod from;
+mod order;
 mod projection;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ mod tests;
 use aggregate::{bind_aggregation, contains_aggregate};
 use bind_expr::{bind_expr, require_boolean};
 use from::bind_from;
+use order::{bind_limit, bind_order_by};
 use projection::bind_projection;
 
 pub fn bind(statements: Vec<Statement>, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> {
@@ -48,8 +50,6 @@ fn bind_query(query: Query, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> 
 
     let unsupported = [
         ("WITH", with.is_some()),
-        ("ORDER BY", order_by.is_some()),
-        ("LIMIT", limit_clause.is_some()),
         ("FETCH", fetch.is_some()),
         ("FOR UPDATE/SHARE", !locks.is_empty()),
         ("FOR XML/JSON", for_clause.is_some()),
@@ -59,11 +59,27 @@ fn bind_query(query: Query, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> 
     ];
     reject_present(&unsupported)?;
 
-    match *body {
-        SetExpr::Select(select) => bind_select(*select, catalog),
-        SetExpr::SetOperation { op, .. } => Err(not_supported(&op.to_string())),
-        _ => Err(not_supported("query bodies other than SELECT")),
+    let mut plan = match *body {
+        SetExpr::Select(select) => bind_select(*select, catalog)?,
+        SetExpr::SetOperation { op, .. } => return Err(not_supported(&op.to_string())),
+        _ => return Err(not_supported("query bodies other than SELECT")),
+    };
+    if let Some(order_by) = order_by {
+        let keys = bind_order_by(order_by, &plan)?;
+        plan = LogicalPlan::Sort {
+            input: Box::new(plan),
+            keys,
+        };
     }
+    if let Some(limit_clause) = limit_clause {
+        let (skip, fetch) = bind_limit(limit_clause)?;
+        plan = LogicalPlan::Limit {
+            input: Box::new(plan),
+            skip,
+            fetch,
+        };
+    }
+    Ok(plan)
 }
 
 fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> {

@@ -45,7 +45,6 @@ pub(super) fn fold_interval(
     Ok(Expr::Literal(ScalarValue::Date32(days)))
 }
 
-/// The signed amount of an interval, in days or months.
 fn interval_amount(interval: ast::Interval) -> EngineResult<(i64, Unit)> {
     let unsupported = || not_supported(&format!("the interval {interval}"));
     let ast::Interval {

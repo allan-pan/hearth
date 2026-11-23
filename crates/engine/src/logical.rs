@@ -26,6 +26,15 @@ pub enum LogicalPlan {
         group_by: Vec<Expr>,
         aggregates: Vec<AggExpr>,
     },
+    Sort {
+        input: Box<LogicalPlan>,
+        keys: Vec<SortKey>,
+    },
+    Limit {
+        input: Box<LogicalPlan>,
+        skip: usize,
+        fetch: Option<usize>,
+    },
 }
 
 impl LogicalPlan {
@@ -61,6 +70,8 @@ impl LogicalPlan {
                     .map(|agg| Field::new(agg.to_string(), agg.data_type(&input), agg.nullable()));
                 Arc::new(Schema::new(keys.chain(results).collect::<Vec<_>>()))
             }
+            LogicalPlan::Sort { input, .. } => input.schema(),
+            LogicalPlan::Limit { input, .. } => input.schema(),
         }
     }
 
@@ -109,11 +120,29 @@ impl LogicalPlan {
                 writeln!(f, "]")?;
                 input.fmt_indented(f, depth + 1)
             }
+            LogicalPlan::Sort { input, keys } => {
+                write!(f, "Sort: ")?;
+                for (i, key) in keys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{key}")?;
+                }
+                writeln!(f)?;
+                input.fmt_indented(f, depth + 1)
+            }
+            LogicalPlan::Limit { input, skip, fetch } => {
+                writeln!(
+                    f,
+                    "Limit: skip {skip}, fetch {}",
+                    fetch.map_or("all".into(), |n| n.to_string())
+                )?;
+                input.fmt_indented(f, depth + 1)
+            }
         }
     }
 }
 
-/// The name of a group key's column in an Aggregate's output.
 pub fn aggregate_key_name(key: &Expr) -> String {
     match key {
         Expr::Column { name, .. } => name.clone(),
@@ -127,12 +156,35 @@ impl fmt::Display for LogicalPlan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortKey {
+    pub expr: Expr,
+    pub ascending: bool,
+    pub nulls_first: bool,
+}
+
+impl fmt::Display for SortKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.expr,
+            if self.ascending { "ASC" } else { "DESC" },
+            if self.nulls_first {
+                "NULLS FIRST"
+            } else {
+                "NULLS LAST"
+            }
+        )
+    }
+}
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType;
 
     use super::*;
     use crate::expr::{AggExpr, AggFunc, BinaryOp, ScalarValue};
+    use crate::logical::SortKey;
 
     fn people() -> LogicalPlan {
         let schema = Arc::new(Schema::new(vec![
@@ -321,6 +373,62 @@ mod tests {
                 Arc::new(Field::new("name", DataType::Utf8View, true)),
                 Arc::new(Field::new("total", DataType::Int64, true)),
             ]
+        );
+    }
+
+    fn key(expr: Expr, ascending: bool, nulls_first: bool) -> SortKey {
+        SortKey {
+            expr,
+            ascending,
+            nulls_first,
+        }
+    }
+
+    #[test]
+    fn sort_key_display() {
+        assert_eq!(
+            key(column(0, "id"), true, false).to_string(),
+            "#0 id ASC NULLS LAST"
+        );
+        assert_eq!(
+            key(column(1, "name"), false, true).to_string(),
+            "#1 name DESC NULLS FIRST"
+        );
+    }
+
+    #[test]
+    fn sort_keeps_its_input_schema() {
+        let plan = LogicalPlan::Sort {
+            input: Box::new(name_then_id()),
+            keys: vec![
+                key(column(1, "id"), false, true),
+                key(column(0, "name"), true, false),
+            ],
+        };
+        assert_eq!(plan.schema(), name_then_id().schema());
+        assert_eq!(
+            plan.to_string(),
+            "Sort: #1 id DESC NULLS FIRST, #0 name ASC NULLS LAST\n  \
+             Project: #1 name, #0 id\n    \
+             Scan: people\n"
+        );
+    }
+
+    #[test]
+    fn limit_keeps_its_input_schema() {
+        let limit = |skip, fetch| LogicalPlan::Limit {
+            input: Box::new(people()),
+            skip,
+            fetch,
+        };
+        assert_eq!(limit(0, Some(10)).schema(), people().schema());
+        assert_eq!(
+            limit(0, Some(10)).to_string(),
+            "Limit: skip 0, fetch 10\n  Scan: people\n"
+        );
+        assert_eq!(
+            limit(5, None).to_string(),
+            "Limit: skip 5, fetch all\n  Scan: people\n"
         );
     }
 }
