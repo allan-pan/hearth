@@ -1,7 +1,7 @@
 use crate::error::{EngineError, EngineResult};
 use crate::expr::Expr;
 use crate::logical::{LogicalPlan, SortKey};
-use crate::sql::{bind_expr, not_supported};
+use crate::sql::{bind_expr, not_supported, reject_aggregates};
 use arrow::datatypes::Schema;
 use sqlparser::ast;
 
@@ -64,7 +64,10 @@ fn order_expr(expr: ast::Expr, plan: &LogicalPlan, output: &Schema) -> EngineRes
             ))),
         },
         _ => match bind_expr(expr.clone(), output) {
-            Ok(bound_expr) => Ok(bound_expr),
+            Ok(bound_expr) => {
+                reject_aggregates(&bound_expr, "ORDER BY")?;
+                Ok(bound_expr)
+            }
             Err(error) => {
                 let not_selected = match plan {
                     LogicalPlan::Project { input, .. } => bind_expr(expr, &input.schema()).is_ok(),

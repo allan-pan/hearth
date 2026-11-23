@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Schema};
 use sqlparser::ast::{self, Ident};
 
-use super::aggregate::is_aggregate;
+use super::aggregate::{bind_aggregate, is_aggregate};
 use super::coerce::{coerce_arithmetic, coerce_list, coerce_pair};
 use super::dates::fold_interval;
 use super::{normalize, not_supported};
@@ -108,10 +108,8 @@ pub(super) fn bind_expr(expr: ast::Expr, input: &Schema) -> EngineResult<Expr> {
             (other, _) => Err(not_supported(&format!("the typed string literal {other}"))),
         },
         ast::Expr::Function(function) if is_aggregate(&function) => {
-            Err(EngineError::Bind(format!(
-                "the aggregate function {} is not allowed here",
-                function.name
-            )))
+            let aggregate = bind_aggregate(function, input)?;
+            Ok(Expr::Aggregate(Box::new(aggregate)))
         }
         other => Err(not_supported(&format!("the expression {other}"))),
     }

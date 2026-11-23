@@ -1093,15 +1093,61 @@ fn unknown_column_next_to_an_aggregate_is_reported_as_unknown() {
 }
 
 #[test]
-fn star_cannot_be_selected_with_group_by_or_aggregates() {
-    bind_error_message("select * from people group by name");
-    bind_error_message("select *, count(*) from people");
+fn star_needs_every_column_in_group_by() {
+    assert!(bind_error_message("select * from people group by name").contains("id"));
+    assert!(bind_error_message("select *, count(*) from people").contains("id"));
+    assert_eq!(
+        plan_text("select * from people group by id, name"),
+        "Project: #0 id, #1 name\n  Aggregate: group by [#0 id, #1 name], aggregates []\n    \
+         Scan: people\n"
+    );
 }
 
 #[test]
-fn aggregates_are_not_allowed_in_where_or_inside_aggregates() {
-    bind_error_message("select name from people where count(*) > 1");
-    bind_error_message("select sum(sum(id)) from people");
+fn grouped_and_plain_select_items_are_named_alike() {
+    assert_eq!(
+        schema_of("select (id) from people group by id"),
+        schema_of("select (id) from people")
+    );
+}
+
+#[test]
+fn group_key_named_like_an_aggregate_stays_a_separate_column() {
+    let mut catalog = MemoryCatalog::new();
+    catalog.register(
+        "t",
+        table(vec![Field::new("COUNT(*)", DataType::Utf8View, false)]),
+    );
+    let sql = r#"select "COUNT(*)", count(*) as n from t group by "COUNT(*)""#;
+    let plan = bind(
+        Parser::parse_sql(&GenericDialect {}, sql).unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.to_string(),
+        "Project: #0 COUNT(*), #1 COUNT(*) AS n\n  \
+         Aggregate: group by [#0 COUNT(*)], aggregates [COUNT(*)]\n    \
+         Scan: t\n"
+    );
+    assert_eq!(plan.schema().field(1).data_type(), &DataType::Int64);
+}
+
+#[test]
+fn aggregates_are_not_allowed_outside_select_items() {
+    let cases = [
+        ("select name from people where count(*) > 1", "WHERE"),
+        ("select sum(sum(id)) from people", "aggregate function"),
+        ("select count(*) from people group by count(*)", "GROUP BY"),
+        (
+            "select count(*) as c from people order by count(*)",
+            "ORDER BY",
+        ),
+    ];
+    for (sql, clause) in cases {
+        let msg = bind_error_message(sql);
+        assert!(msg.contains(clause), "{sql:?} gave {msg:?}");
+    }
 }
 
 #[test]

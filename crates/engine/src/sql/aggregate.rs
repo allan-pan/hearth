@@ -1,7 +1,5 @@
-use std::ops::ControlFlow;
-
 use arrow::datatypes::{DataType, Schema};
-use sqlparser::ast::{self, SelectItem, VisitMut, VisitorMut};
+use sqlparser::ast;
 
 use super::bind_expr::bind_expr;
 use super::{normalize, not_supported, reject_present};
@@ -13,130 +11,82 @@ pub(super) fn is_aggregate(function: &ast::Function) -> bool {
     aggregate_func(&function.name).is_some()
 }
 
-pub(super) fn contains_aggregate(item: &SelectItem) -> bool {
-    let expr = match item {
-        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => expr,
-        _ => return false,
-    };
-    ast::visit_expressions(expr, |e| match e {
-        ast::Expr::Function(function) if is_aggregate(function) => ControlFlow::Break(()),
-        _ => ControlFlow::Continue(()),
-    })
-    .is_break()
+pub(super) fn reject_aggregates(expr: &Expr, clause: &str) -> EngineResult<()> {
+    if expr.contains_aggregate() {
+        return Err(EngineError::Bind(format!(
+            "aggregate functions are not allowed in {clause}"
+        )));
+    }
+    Ok(())
 }
-
-/// Binds a query with GROUP BY or aggregates as a Project over an Aggregate over `input`.
 pub(super) fn bind_aggregation(
     input: LogicalPlan,
     group_by: Vec<ast::Expr>,
-    projection: Vec<SelectItem>,
+    items: Vec<(Expr, String)>,
 ) -> EngineResult<LogicalPlan> {
     let input_schema = input.schema();
     let keys = group_by
         .into_iter()
         .map(|key| match bind_expr(key, &input_schema)? {
             Expr::Literal(value) => Err(not_supported(&format!("GROUP BY {value}"))),
-            key => Ok(key),
+            key => {
+                reject_aggregates(&key, "GROUP BY")?;
+                Ok(key)
+            }
         })
         .collect::<EngineResult<Vec<_>>>()?;
 
     let mut grouping = Grouping {
-        input: &input_schema,
         keys: &keys,
         aggregates: Vec::new(),
     };
-    let mut items = Vec::with_capacity(projection.len());
-    for item in projection {
-        let (mut expr, name) = match item {
-            SelectItem::UnnamedExpr(expr) => {
-                let name = match &expr {
-                    ast::Expr::Identifier(ident) => normalize(ident),
-                    other => other.to_string(),
-                };
-                (expr, name)
-            }
-            SelectItem::ExprWithAlias { expr, alias } => (expr, normalize(&alias)),
-            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
-                return Err(EngineError::Bind(
-                    "* cannot be used with GROUP BY or aggregate functions".to_string(),
-                ));
-            }
-            SelectItem::ExprWithAliases { .. } => {
-                return Err(not_supported("multiple aliases for one expression"));
-            }
-        };
-        if let ControlFlow::Break(error) = expr.visit(&mut grouping) {
-            return Err(error);
-        }
-        items.push((expr, name));
-    }
-    let aggregates = grouping.aggregates;
-
-    let aggregate = LogicalPlan::Aggregate {
-        input: Box::new(input),
-        group_by: keys,
-        aggregates,
-    };
-    let schema = aggregate.schema();
     let exprs = items
         .into_iter()
-        .map(|(expr, name)| Ok((bind_expr(expr, &schema)?, name)))
+        .map(|(expr, name)| Ok((grouping.rewrite(expr)?, name)))
         .collect::<EngineResult<Vec<_>>>()?;
+    let aggregates = grouping.aggregates;
+
     Ok(LogicalPlan::Project {
-        input: Box::new(aggregate),
+        input: Box::new(LogicalPlan::Aggregate {
+            input: Box::new(input),
+            group_by: keys,
+            aggregates,
+        }),
         exprs,
     })
 }
 
-/// Rewrites a select item so aggregate calls and group keys become columns of the Aggregate.
+/// Rewrites bound select items so group keys and aggregate calls become columns of the
+/// Aggregate, whose output is the keys followed by the aggregates.
 struct Grouping<'a> {
-    input: &'a Schema,
     keys: &'a [Expr],
     aggregates: Vec<AggExpr>,
 }
 
-impl VisitorMut for Grouping<'_> {
-    type Break = EngineError;
-
-    fn pre_visit_expr(&mut self, expr: &mut ast::Expr) -> ControlFlow<EngineError> {
-        match self.replacement(expr) {
-            Ok(Some(column)) => {
-                *expr = ast::Expr::Identifier(ast::Ident::with_quote('"', column));
-                ControlFlow::Continue(())
-            }
-            Ok(None) => ControlFlow::Continue(()),
-            Err(error) => ControlFlow::Break(error),
-        }
-    }
-}
-
 impl Grouping<'_> {
-    /// The Aggregate output column that replaces `expr`, if any.
-    fn replacement(&mut self, expr: &ast::Expr) -> EngineResult<Option<String>> {
-        if let ast::Expr::Function(function) = expr
-            && is_aggregate(function)
-        {
-            let aggregate = bind_aggregate(function.clone(), self.input)?;
-            let column = aggregate.to_string();
-            if !self.aggregates.contains(&aggregate) {
-                self.aggregates.push(aggregate);
-            }
-            return Ok(Some(column));
+    fn rewrite(&mut self, expr: Expr) -> EngineResult<Expr> {
+        if let Some(index) = self.keys.iter().position(|key| *key == expr) {
+            return Ok(Expr::Column {
+                index,
+                name: aggregate_key_name(&self.keys[index]),
+            });
         }
-        match bind_expr(expr.clone(), self.input) {
-            Ok(bound) => {
-                if let Some(key) = self.keys.iter().find(|key| **key == bound) {
-                    return Ok(Some(aggregate_key_name(key)));
-                }
-                match bound {
-                    Expr::Column { name, .. } => Err(EngineError::Bind(format!(
-                        "column {name} must appear in GROUP BY or be used in an aggregate function"
-                    ))),
-                    _ => Ok(None),
-                }
+        match expr {
+            Expr::Aggregate(aggregate) => {
+                let position = self.aggregates.iter().position(|a| *a == *aggregate);
+                let position = position.unwrap_or_else(|| {
+                    self.aggregates.push(*aggregate);
+                    self.aggregates.len() - 1
+                });
+                Ok(Expr::Column {
+                    index: self.keys.len() + position,
+                    name: self.aggregates[position].to_string(),
+                })
             }
-            Err(error) if matches!(expr, ast::Expr::Identifier(_)) => Err(error),
-            Err(_) => Ok(None),
+            Expr::Column { name, .. } => Err(EngineError::Bind(format!(
+                "column {name} must appear in GROUP BY or be used in an aggregate function"
+            ))),
+            other => other.try_map_children(|child| self.rewrite(child)),
         }
     }
 }
@@ -155,7 +105,7 @@ fn aggregate_func(name: &ast::ObjectName) -> Option<AggFunc> {
     }
 }
 
-fn bind_aggregate(function: ast::Function, input: &Schema) -> EngineResult<AggExpr> {
+pub(super) fn bind_aggregate(function: ast::Function, input: &Schema) -> EngineResult<AggExpr> {
     let ast::Function {
         name,
         uses_odbc_syntax: _,
@@ -209,6 +159,7 @@ fn bind_aggregate(function: ast::Function, input: &Schema) -> EngineResult<AggEx
         }
         (func, ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(arg))) => {
             let expr = bind_expr(arg, input)?;
+            reject_aggregates(&expr, "the argument of an aggregate function")?;
             let data_type = expr.data_type(input);
             let numeric = matches!(
                 data_type,

@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 storage = { path = "../storage" }
-sqlparser = { version = "0.64", features = ["visitor"] }
+sqlparser = "0.64"
 arrow = "59"
 chrono = "0.4"

@@ -30,6 +30,7 @@ pub enum Expr {
         expr: Box<Expr>,
         to: DataType,
     },
+    Aggregate(Box<AggExpr>),
 }
 
 impl Expr {
@@ -52,6 +53,7 @@ impl Expr {
                 }
             },
             Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => DataType::Boolean,
+            Expr::Aggregate(agg) => agg.data_type(input),
         }
     }
 
@@ -66,7 +68,57 @@ impl Expr {
                 expr.nullable(input) || list.iter().any(|e| e.nullable(input))
             }
             Expr::Cast { expr, .. } => expr.nullable(input),
+            Expr::Aggregate(agg) => agg.nullable(),
         }
+    }
+
+    pub fn contains_aggregate(&self) -> bool {
+        match self {
+            Expr::Aggregate(_) => true,
+            Expr::Column { .. } | Expr::Literal(_) => false,
+            Expr::Binary { left, right, .. } => {
+                left.contains_aggregate() || right.contains_aggregate()
+            }
+            Expr::Not(expr) | Expr::IsNull { expr, .. } | Expr::Cast { expr, .. } => {
+                expr.contains_aggregate()
+            }
+            Expr::InList { expr, list, .. } => {
+                expr.contains_aggregate() || list.iter().any(Expr::contains_aggregate)
+            }
+        }
+    }
+
+    pub fn try_map_children<E>(
+        self,
+        mut f: impl FnMut(Expr) -> Result<Expr, E>,
+    ) -> Result<Expr, E> {
+        let mut boxed = |expr: Box<Expr>| f(*expr).map(Box::new);
+        Ok(match self {
+            Expr::Column { .. } | Expr::Literal(_) | Expr::Aggregate(_) => self,
+            Expr::Binary { left, op, right } => Expr::Binary {
+                left: boxed(left)?,
+                op,
+                right: boxed(right)?,
+            },
+            Expr::Not(expr) => Expr::Not(boxed(expr)?),
+            Expr::IsNull { expr, negated } => Expr::IsNull {
+                expr: boxed(expr)?,
+                negated,
+            },
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => Expr::InList {
+                expr: boxed(expr)?,
+                list: list.into_iter().map(&mut f).collect::<Result<_, E>>()?,
+                negated,
+            },
+            Expr::Cast { expr, to } => Expr::Cast {
+                expr: boxed(expr)?,
+                to,
+            },
+        })
     }
 }
 
@@ -116,6 +168,7 @@ impl fmt::Display for Expr {
                 write!(f, " IS{not} NULL")
             }
             Expr::Cast { expr, to } => write!(f, "CAST({expr} AS {to})"),
+            Expr::Aggregate(agg) => write!(f, "{agg}"),
             Expr::InList {
                 expr,
                 list,

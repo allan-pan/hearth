@@ -15,7 +15,7 @@ mod projection;
 #[cfg(test)]
 mod tests;
 
-use aggregate::{bind_aggregation, contains_aggregate};
+use aggregate::{bind_aggregation, reject_aggregates};
 use bind_expr::{bind_expr, require_boolean};
 use from::bind_from;
 use order::{bind_limit, bind_order_by};
@@ -144,6 +144,7 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
         Some(predicate) => {
             let schema = scan.schema();
             let predicate = bind_expr(predicate, &schema)?;
+            reject_aggregates(&predicate, "WHERE")?;
             require_boolean(&predicate, &schema, "WHERE")?;
             LogicalPlan::Filter {
                 input: Box::new(scan),
@@ -152,10 +153,10 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
         }
         None => scan,
     };
-    if !group_by.is_empty() || projection.iter().any(contains_aggregate) {
-        return bind_aggregation(input, group_by, projection);
-    }
     let exprs = bind_projection(projection, &input.schema())?;
+    if !group_by.is_empty() || exprs.iter().any(|(expr, _)| expr.contains_aggregate()) {
+        return bind_aggregation(input, group_by, exprs);
+    }
 
     Ok(LogicalPlan::Project {
         input: Box::new(input),
