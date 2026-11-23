@@ -1,9 +1,9 @@
 //! Type coercion: converting the operands of a comparison or arithmetic to types that fit.
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::{DECIMAL128_MAX_SCALE, DataType, Schema};
 
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{BinaryOp, Expr, ScalarValue};
-use crate::types::{as_decimal, common_type, is_numeric};
+use crate::types::{arithmetic_signature, common_type, is_numeric};
 
 pub(super) fn coerce_pair(left: Expr, right: Expr, input: &Schema) -> EngineResult<(Expr, Expr)> {
     let [left, right] = <[Expr; 2]>::try_from(coerce_operands(vec![left, right], input)?)
@@ -77,25 +77,32 @@ pub(super) fn coerce_arithmetic(
             "{op} needs numbers, got {left} of type {l} and {right} of type {r}"
         )));
     }
-    let is_decimal = |t: &DataType| matches!(t, DataType::Decimal128(..));
-    match (is_decimal(&l), is_decimal(&r)) {
-        (false, false) => coerce_pair(left, right, input),
-        (true, true) => Ok((left, right)),
-        (false, true) => Ok((decimal_operand(left, &l), right)),
-        (true, false) => Ok((left, decimal_operand(right, &r))),
-    }
+    let (left, right) = match (&l, &r) {
+        (DataType::Decimal128(..), DataType::Decimal128(..)) => (left, right),
+        (DataType::Decimal128(..), DataType::Int32 | DataType::Int64) => {
+            (left, narrowest_decimal_literal(right))
+        }
+        (DataType::Int32 | DataType::Int64, DataType::Decimal128(..)) => {
+            (narrowest_decimal_literal(left), right)
+        }
+        _ => coerce_pair(left, right, input)?,
+    };
+    let (l, r) = (left.data_type(input), right.data_type(input));
+    let signature = arithmetic_signature(op, &l, &r).ok_or_else(|| {
+        EngineError::Bind(format!(
+            "{left} {op} {right} needs more than {DECIMAL128_MAX_SCALE} digits after the decimal point"
+        ))
+    })?;
+    Ok((
+        convert(left, &l, &signature.left),
+        convert(right, &r, &signature.right),
+    ))
 }
 
-fn decimal_operand(expr: Expr, integer_type: &DataType) -> Expr {
-    if let Expr::Literal(value) = &expr
-        && let Some(value) = narrowest_decimal(value)
-    {
-        return Expr::Literal(value);
-    }
-    let (precision, scale) = as_decimal(integer_type).expect("an integer type");
-    Expr::Cast {
-        expr: Box::new(expr),
-        to: DataType::Decimal128(precision, scale),
+fn narrowest_decimal_literal(expr: Expr) -> Expr {
+    match &expr {
+        Expr::Literal(value) => narrowest_decimal(value).map_or(expr, Expr::Literal),
+        _ => expr,
     }
 }
 

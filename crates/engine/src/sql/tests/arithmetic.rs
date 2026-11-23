@@ -150,3 +150,40 @@ fn unaliased_expression_is_named_by_its_sql_text() {
 fn alias_still_names_an_expression() {
     assert_eq!(items_select("price * 2 as twice").1, "twice");
 }
+
+#[test]
+fn decimal_product_with_too_many_fraction_digits_is_a_bind_error() {
+    let nineteen_places = format!("0.{}1", "0".repeat(18));
+    assert_eq!(
+        items_select(&format!("{nineteen_places} * {nineteen_places}")).2,
+        DataType::Decimal128(38, 38)
+    );
+    let msg = bind_error_message(&format!(
+        "select {nineteen_places} * {nineteen_places} * price from items"
+    ));
+    assert!(msg.contains("digits after the decimal point"), "{msg:?}");
+}
+
+#[test]
+fn float_results_take_part_in_arithmetic_and_comparisons() {
+    let float_of = |sql: &str| schema_of(sql)[0].1.clone();
+    assert_eq!(
+        float_of("select avg(id) + 1 from people"),
+        DataType::Float64
+    );
+    assert_eq!(
+        float_of("select avg(id) * avg(id) from people"),
+        DataType::Float64
+    );
+    assert_eq!(
+        plan_text("select avg(qty) - price from items group by price")
+            .lines()
+            .next()
+            .unwrap(),
+        "Project: #1 AVG(#1 qty) - CAST(#0 price AS Float64) AS avg(qty) - price"
+    );
+    assert_eq!(
+        float_of("select avg(id) > 1 from people"),
+        DataType::Boolean
+    );
+}

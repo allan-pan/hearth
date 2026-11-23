@@ -57,9 +57,12 @@ impl Expr {
                 | BinaryOp::Or => DataType::Boolean,
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
                     let (l, r) = (left.data_type(input), right.data_type(input));
-                    types::arithmetic_type(*op, &l, &r).unwrap_or_else(|| {
-                        unreachable!("the binder coerces {l} {op} {r} to operands it accepts")
-                    })
+                    types::arithmetic_signature(*op, &l, &r)
+                        .filter(|sig| sig.left == l && sig.right == r)
+                        .unwrap_or_else(|| {
+                            unreachable!("the binder converts {l} {op} {r} to its signature")
+                        })
+                        .output
                 }
             },
             Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => DataType::Boolean,
