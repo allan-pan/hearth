@@ -3,6 +3,7 @@ use sqlparser::ast::{GroupByExpr, Ident, Query, Select, SelectFlavor, SetExpr, S
 
 use crate::catalog::Catalog;
 use crate::error::{EngineError, EngineResult};
+use crate::expr::Expr;
 use crate::logical::LogicalPlan;
 
 mod aggregate;
@@ -59,13 +60,18 @@ fn bind_query(query: Query, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> 
     ];
     reject_present(&unsupported)?;
 
-    let mut plan = match *body {
+    let Projection { input, exprs } = match *body {
         SetExpr::Select(select) => bind_select(*select, catalog)?,
         SetExpr::SetOperation { op, .. } => return Err(not_supported(&op.to_string())),
         _ => return Err(not_supported("query bodies other than SELECT")),
     };
+    let input_schema = input.schema();
+    let mut plan = LogicalPlan::Project {
+        input: Box::new(input),
+        exprs,
+    };
     if let Some(order_by) = order_by {
-        let keys = bind_order_by(order_by, &plan)?;
+        let keys = bind_order_by(order_by, &plan.schema(), &input_schema)?;
         plan = LogicalPlan::Sort {
             input: Box::new(plan),
             keys,
@@ -82,7 +88,12 @@ fn bind_query(query: Query, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> 
     Ok(plan)
 }
 
-fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPlan> {
+struct Projection {
+    input: LogicalPlan,
+    exprs: Vec<(Expr, String)>,
+}
+
+fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<Projection> {
     let Select {
         select_token: _,
         optimizer_hints,
@@ -157,11 +168,7 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
     if !group_by.is_empty() || exprs.iter().any(|(expr, _)| expr.contains_aggregate()) {
         return bind_aggregation(input, group_by, exprs);
     }
-
-    Ok(LogicalPlan::Project {
-        input: Box::new(input),
-        exprs,
-    })
+    Ok(Projection { input, exprs })
 }
 
 fn normalize(ident: &Ident) -> String {

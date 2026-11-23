@@ -2,7 +2,7 @@ use arrow::datatypes::Schema;
 use sqlparser::ast;
 
 use super::bind_expr::bind_expr;
-use super::{normalize, not_supported, reject_present};
+use super::{Projection, normalize, not_supported, reject_present};
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{AggExpr, AggFunc, Expr};
 use crate::logical::{LogicalPlan, aggregate_key_name};
@@ -24,7 +24,7 @@ pub(super) fn bind_aggregation(
     input: LogicalPlan,
     group_by: Vec<ast::Expr>,
     items: Vec<(Expr, String)>,
-) -> EngineResult<LogicalPlan> {
+) -> EngineResult<Projection> {
     let input_schema = input.schema();
     let keys = group_by
         .into_iter()
@@ -47,14 +47,12 @@ pub(super) fn bind_aggregation(
         .collect::<EngineResult<Vec<_>>>()?;
     let aggregates = grouping.aggregates;
 
-    Ok(LogicalPlan::Project {
-        input: Box::new(LogicalPlan::Aggregate {
-            input: Box::new(input),
-            group_by: keys,
-            aggregates,
-        }),
-        exprs,
-    })
+    let input = LogicalPlan::Aggregate {
+        input: Box::new(input),
+        group_by: keys,
+        aggregates,
+    };
+    Ok(Projection { input, exprs })
 }
 
 /// Rewrites bound select items so group keys and aggregate calls become columns of the

@@ -1,13 +1,14 @@
 use crate::error::{EngineError, EngineResult};
 use crate::expr::Expr;
-use crate::logical::{LogicalPlan, SortKey};
+use crate::logical::SortKey;
 use crate::sql::{bind_expr, not_supported, reject_aggregates};
 use arrow::datatypes::Schema;
 use sqlparser::ast;
 
 pub(super) fn bind_order_by(
     order_by: ast::OrderBy,
-    plan: &LogicalPlan,
+    output: &Schema,
+    projected: &Schema,
 ) -> EngineResult<Vec<SortKey>> {
     let ast::OrderBy { kind, interpolate } = order_by;
     if interpolate.is_some() {
@@ -17,14 +18,13 @@ pub(super) fn bind_order_by(
         ast::OrderByKind::Expressions(items) => items,
         ast::OrderByKind::All(_) => return Err(not_supported("ORDER BY ALL")),
     };
-    let output = plan.schema();
     items
         .into_iter()
-        .map(|item| sort_key(item, plan, &output))
+        .map(|item| sort_key(item, output, projected))
         .collect()
 }
 
-fn sort_key(item: ast::OrderByExpr, plan: &LogicalPlan, output: &Schema) -> EngineResult<SortKey> {
+fn sort_key(item: ast::OrderByExpr, output: &Schema, projected: &Schema) -> EngineResult<SortKey> {
     let ast::OrderByExpr {
         expr,
         options: ast::OrderByOptions { sort, nulls_first },
@@ -41,7 +41,7 @@ fn sort_key(item: ast::OrderByExpr, plan: &LogicalPlan, output: &Schema) -> Engi
         Some(ast::OrderBySort::Desc) => false,
         Some(ast::OrderBySort::Using(_)) => return Err(not_supported("ORDER BY ... USING")),
     };
-    let expr = order_expr(expr, plan, output)?;
+    let expr = order_expr(expr, output, projected)?;
     Ok(SortKey {
         expr,
         ascending,
@@ -49,7 +49,7 @@ fn sort_key(item: ast::OrderByExpr, plan: &LogicalPlan, output: &Schema) -> Engi
     })
 }
 
-fn order_expr(expr: ast::Expr, plan: &LogicalPlan, output: &Schema) -> EngineResult<Expr> {
+fn order_expr(expr: ast::Expr, output: &Schema, projected: &Schema) -> EngineResult<Expr> {
     match expr {
         ast::Expr::Value(ast::ValueWithSpan {
             value: ast::Value::Number(n, _),
@@ -68,17 +68,10 @@ fn order_expr(expr: ast::Expr, plan: &LogicalPlan, output: &Schema) -> EngineRes
                 reject_aggregates(&bound_expr, "ORDER BY")?;
                 Ok(bound_expr)
             }
-            Err(error) => {
-                let not_selected = match plan {
-                    LogicalPlan::Project { input, .. } => bind_expr(expr, &input.schema()).is_ok(),
-                    _ => false,
-                };
-                if not_selected {
-                    Err(not_supported("ORDER BY a column that is not selected"))
-                } else {
-                    Err(error)
-                }
+            Err(_) if bind_expr(expr, projected).is_ok() => {
+                Err(not_supported("ORDER BY a column that is not selected"))
             }
+            Err(error) => Err(error),
         },
     }
 }
