@@ -330,7 +330,6 @@ impl fmt::Display for ScalarValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "aggregates are not bound yet"))]
 pub enum AggFunc {
     Count,
     Sum,
@@ -352,7 +351,6 @@ impl fmt::Display for AggFunc {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "aggregates are not bound yet"))]
 pub enum AggExpr {
     CountAll,
     Call { func: AggFunc, expr: Expr },

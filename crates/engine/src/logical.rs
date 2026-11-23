@@ -8,7 +8,6 @@ use storage::table::Snapshot;
 use crate::expr::{AggExpr, Expr};
 
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "aggregates are not bound yet"))]
 pub enum LogicalPlan {
     Scan {
         table: String,
@@ -51,11 +50,11 @@ impl LogicalPlan {
             } => {
                 let input = input.schema();
                 let keys = group_by.iter().map(|expr| {
-                    let name = match expr {
-                        Expr::Column { name, .. } => name.clone(),
-                        _ => expr.to_string(),
-                    };
-                    Field::new(name, expr.data_type(&input), expr.nullable(&input))
+                    Field::new(
+                        aggregate_key_name(expr),
+                        expr.data_type(&input),
+                        expr.nullable(&input),
+                    )
                 });
                 let results = aggregates
                     .iter()
@@ -64,9 +63,7 @@ impl LogicalPlan {
             }
         }
     }
-}
 
-impl LogicalPlan {
     fn fmt_indented(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
         write!(f, "{:indent$}", "", indent = depth * 2)?;
         match self {
@@ -113,6 +110,14 @@ impl LogicalPlan {
                 input.fmt_indented(f, depth + 1)
             }
         }
+    }
+}
+
+/// The name of a group key's column in an Aggregate's output.
+pub fn aggregate_key_name(key: &Expr) -> String {
+    match key {
+        Expr::Column { name, .. } => name.clone(),
+        _ => key.to_string(),
     }
 }
 

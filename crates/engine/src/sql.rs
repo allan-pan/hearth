@@ -5,6 +5,7 @@ use crate::catalog::Catalog;
 use crate::error::{EngineError, EngineResult};
 use crate::logical::LogicalPlan;
 
+mod aggregate;
 mod bind_expr;
 mod coerce;
 mod dates;
@@ -13,6 +14,7 @@ mod projection;
 #[cfg(test)]
 mod tests;
 
+use aggregate::{bind_aggregation, contains_aggregate};
 use bind_expr::{bind_expr, require_boolean};
 use from::bind_from;
 use projection::bind_projection;
@@ -92,11 +94,11 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
         flavor,
     } = select;
 
-    // No GROUP BY parses as an empty `Expressions`, not as a None.
-    let has_group_by = !matches!(
-        &group_by,
-        GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty()
-    );
+    let group_by = match group_by {
+        GroupByExpr::Expressions(exprs, modifiers) if modifiers.is_empty() => exprs,
+        GroupByExpr::Expressions(..) => return Err(not_supported("GROUP BY modifiers")),
+        GroupByExpr::All(_) => return Err(not_supported("GROUP BY ALL")),
+    };
     let unsupported = [
         ("optimizer hints", !optimizer_hints.is_empty()),
         ("DISTINCT", distinct.is_some()),
@@ -107,7 +109,6 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
         ("LATERAL VIEW", !lateral_views.is_empty()),
         ("PREWHERE", prewhere.is_some()),
         ("CONNECT BY", !connect_by.is_empty()),
-        ("GROUP BY", has_group_by),
         ("CLUSTER BY", !cluster_by.is_empty()),
         ("DISTRIBUTE BY", !distribute_by.is_empty()),
         ("SORT BY", !sort_by.is_empty()),
@@ -135,6 +136,9 @@ fn bind_select(select: Select, catalog: &dyn Catalog) -> EngineResult<LogicalPla
         }
         None => scan,
     };
+    if !group_by.is_empty() || projection.iter().any(contains_aggregate) {
+        return bind_aggregation(input, group_by, projection);
+    }
     let exprs = bind_projection(projection, &input.schema())?;
 
     Ok(LogicalPlan::Project {
