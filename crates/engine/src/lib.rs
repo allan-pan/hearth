@@ -16,6 +16,7 @@ mod logical;
 mod optimizer;
 mod physical;
 mod sql;
+mod types;
 
 pub struct QueryResult {
     pub schema: SchemaRef,

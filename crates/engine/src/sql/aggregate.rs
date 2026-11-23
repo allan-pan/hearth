@@ -1,4 +1,4 @@
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::Schema;
 use sqlparser::ast;
 
 use super::bind_expr::bind_expr;
@@ -6,6 +6,7 @@ use super::{normalize, not_supported, reject_present};
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{AggExpr, AggFunc, Expr};
 use crate::logical::{LogicalPlan, aggregate_key_name};
+use crate::types::aggregate_type;
 
 pub(super) fn is_aggregate(function: &ast::Function) -> bool {
     aggregate_func(&function.name).is_some()
@@ -161,11 +162,7 @@ pub(super) fn bind_aggregate(function: ast::Function, input: &Schema) -> EngineR
             let expr = bind_expr(arg, input)?;
             reject_aggregates(&expr, "the argument of an aggregate function")?;
             let data_type = expr.data_type(input);
-            let numeric = matches!(
-                data_type,
-                DataType::Int32 | DataType::Int64 | DataType::Decimal128(..)
-            );
-            if matches!(func, AggFunc::Sum | AggFunc::Avg) && !numeric {
+            if aggregate_type(func, &data_type).is_none() {
                 return Err(EngineError::Bind(format!(
                     "{name} needs a number, got {expr} of type {data_type}"
                 )));

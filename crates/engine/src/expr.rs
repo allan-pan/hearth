@@ -4,6 +4,8 @@ use std::fmt;
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, Schema};
 use chrono::{Datelike, NaiveDate};
 
+use crate::types;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Column {
@@ -49,7 +51,10 @@ impl Expr {
                 | BinaryOp::And
                 | BinaryOp::Or => DataType::Boolean,
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    arithmetic_type(*op, &left.data_type(input), &right.data_type(input))
+                    let (l, r) = (left.data_type(input), right.data_type(input));
+                    types::arithmetic_type(*op, &l, &r).unwrap_or_else(|| {
+                        unreachable!("the binder coerces {l} {op} {r} to operands it accepts")
+                    })
                 }
             },
             Expr::Not(_) | Expr::IsNull { .. } | Expr::InList { .. } => DataType::Boolean,
@@ -119,31 +124,6 @@ impl Expr {
                 to,
             },
         })
-    }
-}
-
-/// The type Arrow's arithmetic kernels return for these operands.
-fn arithmetic_type(op: BinaryOp, left: &DataType, right: &DataType) -> DataType {
-    match (left, right) {
-        (DataType::Int32, DataType::Int32) => DataType::Int32,
-        (DataType::Int64, DataType::Int64) => DataType::Int64,
-        (DataType::Decimal128(p1, s1), DataType::Decimal128(p2, s2)) => {
-            let (p1, s1, p2, s2) = (
-                i16::from(*p1),
-                i16::from(*s1),
-                i16::from(*p2),
-                i16::from(*s2),
-            );
-            let (precision, scale) = match op {
-                BinaryOp::Multiply => (p1 + p2 + 1, s1 + s2),
-                _ => {
-                    let scale = s1.max(s2);
-                    ((p1 - s1).max(p2 - s2) + scale + 1, scale)
-                }
-            };
-            DataType::Decimal128(precision.min(38) as u8, scale as i8)
-        }
-        _ => unreachable!("the binder never builds {left} {op} {right}"),
     }
 }
 
@@ -413,16 +393,12 @@ impl AggExpr {
     pub fn data_type(&self, input: &Schema) -> DataType {
         match self {
             AggExpr::CountAll => DataType::Int64,
-            AggExpr::Call { func, expr } => match func {
-                AggFunc::Count => DataType::Int64,
-                AggFunc::Sum => match expr.data_type(input) {
-                    DataType::Int32 | DataType::Int64 => DataType::Int64,
-                    DataType::Decimal128(_, scale) => DataType::Decimal128(38, scale),
-                    other => unreachable!("the binder never builds SUM over {other}"),
-                },
-                AggFunc::Avg => DataType::Float64,
-                AggFunc::Max | AggFunc::Min => expr.data_type(input),
-            },
+            AggExpr::Call { func, expr } => {
+                let input_type = expr.data_type(input);
+                types::aggregate_type(*func, &input_type).unwrap_or_else(|| {
+                    unreachable!("the binder checks that {func} accepts {input_type}")
+                })
+            }
         }
     }
     /// Counts are never NULL. The others are NULL over zero rows, whatever their input.
