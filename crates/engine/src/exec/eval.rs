@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use arrow::{
-    array::{Array, ArrayRef, AsArray, BooleanArray, Datum, Scalar, UInt32Array},
+    array::{
+        Array, ArrayRef, AsArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float64Array,
+        Int32Array, Int64Array, StringViewArray, UInt32Array,
+    },
     compute::{
         CastOptions,
         kernels::{boolean, cast, cmp, numeric},
@@ -11,108 +14,104 @@ use arrow::{
     record_batch::RecordBatch,
 };
 
-use super::scalar::to_arrow_scalar;
 use crate::error::{EngineError, EngineResult};
 use crate::expr::{BinaryOp, Expr, ScalarValue};
 
 pub enum ColumnarValue {
     Array(ArrayRef),
-    Scalar(Scalar<ArrayRef>),
+    Scalar(ArrayRef),
+}
+
+impl Datum for ColumnarValue {
+    fn get(&self) -> (&dyn Array, bool) {
+        match self {
+            Self::Array(a) => (a.as_ref(), false),
+            Self::Scalar(a) => (a.as_ref(), true),
+        }
+    }
 }
 
 impl ColumnarValue {
-    pub fn as_datum(&self) -> &dyn Datum {
-        match self {
-            Self::Array(a) => a,
-            Self::Scalar(s) => s,
-        }
+    pub fn from_scalar(value: &ScalarValue) -> EngineResult<Self> {
+        let array: ArrayRef = match value {
+            ScalarValue::Boolean(v) => Arc::new(BooleanArray::from(vec![*v])),
+            ScalarValue::Int32(v) => Arc::new(Int32Array::from(vec![*v])),
+            ScalarValue::Int64(v) => Arc::new(Int64Array::from(vec![*v])),
+            ScalarValue::Float64(v) => Arc::new(Float64Array::from(vec![*v])),
+            ScalarValue::Decimal128 {
+                value,
+                precision,
+                scale,
+            } => Arc::new(
+                Decimal128Array::from(vec![*value]).with_precision_and_scale(*precision, *scale)?,
+            ),
+            ScalarValue::Date32(v) => Arc::new(Date32Array::from(vec![*v])),
+            ScalarValue::Utf8(v) => Arc::new(StringViewArray::from(vec![v.as_str()])),
+        };
+        Ok(Self::from_array(array, true))
     }
 
     pub fn data_type(&self) -> &DataType {
-        match self {
-            Self::Array(a) => a.data_type(),
-            Self::Scalar(s) => s.get().0.data_type(),
-        }
+        self.get().0.data_type()
     }
 
     pub fn into_array(self, num_rows: usize) -> EngineResult<ArrayRef> {
         match self {
             Self::Array(a) => Ok(a),
-            Self::Scalar(s) => {
+            Self::Scalar(a) => {
                 let indices = UInt32Array::from(vec![0; num_rows]);
-                Ok(arrow::compute::take(s.get().0, &indices, None)?)
+                Ok(arrow::compute::take(a.as_ref(), &indices, None)?)
             }
         }
     }
 
-    fn map_arrow_err(err: ArrowError) -> EngineError {
-        match err {
-            ArrowError::ArithmeticOverflow(msg) | ArrowError::CastError(msg) => {
-                EngineError::Execution(msg)
-            }
-            ArrowError::DivideByZero => EngineError::Execution("division by zero".to_string()),
-            other => EngineError::Arrow(other),
+    fn is_scalar(&self) -> bool {
+        matches!(self, Self::Scalar(_))
+    }
+
+    fn from_array(array: ArrayRef, is_scalar: bool) -> Self {
+        if is_scalar {
+            debug_assert_eq!(array.len(), 1);
+            Self::Scalar(array)
+        } else {
+            Self::Array(array)
         }
+    }
+
+    fn into_inner(self) -> ArrayRef {
+        match self {
+            Self::Array(a) | Self::Scalar(a) => a,
+        }
+    }
+
+    fn map_array(
+        self,
+        f: impl FnOnce(&dyn Array) -> Result<ArrayRef, ArrowError>,
+    ) -> EngineResult<Self> {
+        let is_scalar = self.is_scalar();
+        let array = f(self.get().0)?;
+        Ok(Self::from_array(array, is_scalar))
     }
 }
 
 pub fn evaluate(expr: &Expr, batch: &RecordBatch) -> EngineResult<ColumnarValue> {
     let value = match expr {
         Expr::Column { index, .. } => ColumnarValue::Array(batch.column(*index).clone()),
-        Expr::Literal(v) => ColumnarValue::Scalar(to_arrow_scalar(v)?),
+        Expr::Literal(v) => ColumnarValue::from_scalar(v)?,
         Expr::Binary { left, op, right } => {
             let left = evaluate(left, batch)?;
             let right = evaluate(right, batch)?;
-            match op {
-                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    let kernel = match op {
-                        BinaryOp::Add => numeric::add,
-                        BinaryOp::Subtract => numeric::sub,
-                        BinaryOp::Multiply => numeric::mul,
-                        _ => unreachable!(),
-                    };
-                    let arr = kernel(left.as_datum(), right.as_datum())
-                        .map_err(ColumnarValue::map_arrow_err)?;
-                    wrap_binary(&left, &right, arr)
-                }
-                BinaryOp::Eq
-                | BinaryOp::NotEq
-                | BinaryOp::Lt
-                | BinaryOp::LtEq
-                | BinaryOp::Gt
-                | BinaryOp::GtEq => {
-                    let kernel = match op {
-                        BinaryOp::Eq => cmp::eq,
-                        BinaryOp::NotEq => cmp::neq,
-                        BinaryOp::Lt => cmp::lt,
-                        BinaryOp::LtEq => cmp::lt_eq,
-                        BinaryOp::Gt => cmp::gt,
-                        BinaryOp::GtEq => cmp::gt_eq,
-                        _ => unreachable!(),
-                    };
-                    let arr = kernel(left.as_datum(), right.as_datum())
-                        .map_err(ColumnarValue::map_arrow_err)?;
-                    wrap_binary(&left, &right, Arc::new(arr))
-                }
-                BinaryOp::And => {
-                    eval_bool_binary(left, right, batch.num_rows(), boolean::and_kleene)?
-                }
-                BinaryOp::Or => {
-                    eval_bool_binary(left, right, batch.num_rows(), boolean::or_kleene)?
-                }
-            }
+            eval_binary(left, *op, right, batch.num_rows())?
         }
-        Expr::Not(inner) => apply_unary(evaluate(inner, batch)?, |a| {
-            Ok(Arc::new(boolean::not(a.as_boolean())?))
-        })?,
-        Expr::IsNull { expr, negated } => apply_unary(evaluate(expr, batch)?, |a| {
+        Expr::Not(inner) => eval_not(evaluate(inner, batch)?)?,
+        Expr::IsNull { expr, negated } => evaluate(expr, batch)?.map_array(|a| {
             Ok(Arc::new(if *negated {
                 boolean::is_not_null(a)?
             } else {
                 boolean::is_null(a)?
             }))
         })?,
-        Expr::Cast { expr, to } => apply_unary(evaluate(expr, batch)?, |a| {
+        Expr::Cast { expr, to } => evaluate(expr, batch)?.map_array(|a| {
             cast::cast_with_options(
                 a,
                 to,
@@ -126,39 +125,18 @@ pub fn evaluate(expr: &Expr, batch: &RecordBatch) -> EngineResult<ColumnarValue>
             expr,
             list,
             negated,
-        } => {
-            if list.is_empty() {
-                ColumnarValue::Scalar(to_arrow_scalar(&ScalarValue::Boolean(*negated))?)
-            } else {
+        } => match list.split_first() {
+            None => ColumnarValue::from_scalar(&ScalarValue::Boolean(*negated))?,
+            Some((first, rest)) => {
                 let lhs = evaluate(expr, batch)?;
-                let mut acc = None;
-
-                for item in list {
-                    let rhs = evaluate(item, batch)?;
-                    let eq_res = wrap_binary(
-                        &lhs,
-                        &rhs,
-                        Arc::new(
-                            cmp::eq(lhs.as_datum(), rhs.as_datum())
-                                .map_err(ColumnarValue::map_arrow_err)?,
-                        ),
-                    );
-                    acc = Some(match acc {
-                        None => eq_res,
-                        Some(prev) => {
-                            eval_bool_binary(prev, eq_res, batch.num_rows(), boolean::or_kleene)?
-                        }
-                    });
+                let mut acc = eval_eq(&lhs, &evaluate(first, batch)?)?;
+                for item in rest {
+                    let eq = eval_eq(&lhs, &evaluate(item, batch)?)?;
+                    acc = eval_bool_binary(acc, eq, batch.num_rows(), boolean::or_kleene)?;
                 }
-
-                let result = acc.expect("non empty list should have produced a result");
-                if *negated {
-                    apply_unary(result, |a| Ok(Arc::new(boolean::not(a.as_boolean())?)))?
-                } else {
-                    result
-                }
+                if *negated { eval_not(acc)? } else { acc }
             }
-        }
+        },
         Expr::Aggregate(agg) => {
             return Err(EngineError::Execution(format!(
                 "unexpected aggregate expression {agg} during scalar evaluation"
@@ -169,27 +147,40 @@ pub fn evaluate(expr: &Expr, batch: &RecordBatch) -> EngineResult<ColumnarValue>
     Ok(value)
 }
 
-fn wrap_binary(left: &ColumnarValue, right: &ColumnarValue, array: ArrayRef) -> ColumnarValue {
-    match (left, right) {
-        (ColumnarValue::Scalar(_), ColumnarValue::Scalar(_)) => {
-            ColumnarValue::Scalar(Scalar::new(array))
-        }
-        _ => ColumnarValue::Array(array),
-    }
+fn eval_binary(
+    left: ColumnarValue,
+    op: BinaryOp,
+    right: ColumnarValue,
+    num_rows: usize,
+) -> EngineResult<ColumnarValue> {
+    let array: ArrayRef = match op {
+        BinaryOp::Add => numeric::add(&left, &right)?,
+        BinaryOp::Subtract => numeric::sub(&left, &right)?,
+        BinaryOp::Multiply => numeric::mul(&left, &right)?,
+        BinaryOp::Eq => Arc::new(cmp::eq(&left, &right)?),
+        BinaryOp::NotEq => Arc::new(cmp::neq(&left, &right)?),
+        BinaryOp::Lt => Arc::new(cmp::lt(&left, &right)?),
+        BinaryOp::LtEq => Arc::new(cmp::lt_eq(&left, &right)?),
+        BinaryOp::Gt => Arc::new(cmp::gt(&left, &right)?),
+        BinaryOp::GtEq => Arc::new(cmp::gt_eq(&left, &right)?),
+        BinaryOp::And => return eval_bool_binary(left, right, num_rows, boolean::and_kleene),
+        BinaryOp::Or => return eval_bool_binary(left, right, num_rows, boolean::or_kleene),
+    };
+    Ok(ColumnarValue::from_array(
+        array,
+        left.is_scalar() && right.is_scalar(),
+    ))
 }
 
-fn apply_unary(
-    value: ColumnarValue,
-    f: impl FnOnce(&dyn Array) -> Result<ArrayRef, ArrowError>,
-) -> EngineResult<ColumnarValue> {
-    match value {
-        ColumnarValue::Scalar(s) => Ok(ColumnarValue::Scalar(Scalar::new(
-            f(s.get().0).map_err(ColumnarValue::map_arrow_err)?,
-        ))),
-        ColumnarValue::Array(a) => Ok(ColumnarValue::Array(
-            f(a.as_ref()).map_err(ColumnarValue::map_arrow_err)?,
-        )),
-    }
+fn eval_eq(left: &ColumnarValue, right: &ColumnarValue) -> EngineResult<ColumnarValue> {
+    Ok(ColumnarValue::from_array(
+        Arc::new(cmp::eq(left, right)?),
+        left.is_scalar() && right.is_scalar(),
+    ))
+}
+
+fn eval_not(value: ColumnarValue) -> EngineResult<ColumnarValue> {
+    value.map_array(|a| Ok(Arc::new(boolean::not(a.as_boolean())?)))
 }
 
 fn eval_bool_binary(
@@ -198,19 +189,16 @@ fn eval_bool_binary(
     num_rows: usize,
     f: impl FnOnce(&BooleanArray, &BooleanArray) -> Result<BooleanArray, ArrowError>,
 ) -> EngineResult<ColumnarValue> {
-    match (left, right) {
-        (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) => {
-            let res = f(l.get().0.as_boolean(), r.get().0.as_boolean())
-                .map_err(ColumnarValue::map_arrow_err)?;
-            Ok(ColumnarValue::Scalar(Scalar::new(Arc::new(res))))
-        }
-        (l, r) => {
-            let l = l.into_array(num_rows)?;
-            let r = r.into_array(num_rows)?;
-            let res = f(l.as_boolean(), r.as_boolean()).map_err(ColumnarValue::map_arrow_err)?;
-            Ok(ColumnarValue::Array(Arc::new(res)))
-        }
-    }
+    let is_scalar = left.is_scalar() && right.is_scalar();
+    let (l, r) = if is_scalar {
+        (left.into_inner(), right.into_inner())
+    } else {
+        (left.into_array(num_rows)?, right.into_array(num_rows)?)
+    };
+    Ok(ColumnarValue::from_array(
+        Arc::new(f(l.as_boolean(), r.as_boolean())?),
+        is_scalar,
+    ))
 }
 
 #[cfg(test)]
@@ -635,5 +623,28 @@ mod tests {
         let batch = sample_batch();
         let err = evaluate(&Expr::Aggregate(Box::new(AggExpr::CountAll)), &batch);
         assert!(matches!(err, Err(EngineError::Execution(_))));
+    }
+
+    #[test]
+    fn from_scalar_covers_all_variants() {
+        for variant in [
+            ScalarValue::Boolean(true),
+            ScalarValue::Int32(42),
+            ScalarValue::Int64(1234567890),
+            ScalarValue::Float64(1.23),
+            ScalarValue::Decimal128 {
+                value: 12345678901234567890,
+                precision: 20,
+                scale: 10,
+            },
+            ScalarValue::Date32(18628),
+            ScalarValue::Utf8("Hello, world!".to_string()),
+        ] {
+            let val = ColumnarValue::from_scalar(&variant).unwrap();
+            let (array, is_scalar) = val.get();
+            assert!(is_scalar);
+            assert_eq!(array.len(), 1);
+            assert_eq!(array.data_type(), &variant.data_type());
+        }
     }
 }

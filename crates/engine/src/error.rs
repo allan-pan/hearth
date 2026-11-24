@@ -54,6 +54,12 @@ impl From<StorageError> for EngineError {
 
 impl From<ArrowError> for EngineError {
     fn from(e: ArrowError) -> Self {
-        EngineError::Arrow(e)
+        match e {
+            ArrowError::ArithmeticOverflow(msg) | ArrowError::CastError(msg) => {
+                EngineError::Execution(msg)
+            }
+            ArrowError::DivideByZero => EngineError::Execution("division by zero".to_string()),
+            other => EngineError::Arrow(other),
+        }
     }
 }
