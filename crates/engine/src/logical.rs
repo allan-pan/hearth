@@ -42,16 +42,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Scan { snapshot, .. } => snapshot.schema.clone(),
             LogicalPlan::Filter { input, .. } => input.schema(),
-            LogicalPlan::Project { input, exprs } => {
-                let input = input.schema();
-                let fields: Vec<Field> = exprs
-                    .iter()
-                    .map(|(expr, name)| {
-                        Field::new(name, expr.data_type(&input), expr.nullable(&input))
-                    })
-                    .collect();
-                Arc::new(Schema::new(fields))
-            }
+            LogicalPlan::Project { input, exprs } => project_schema(&input.schema(), exprs),
             LogicalPlan::Aggregate {
                 group_by,
                 aggregates,
@@ -89,11 +80,7 @@ impl LogicalPlan {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{expr}")?;
-                    let same_name = matches!(expr, Expr::Column { name, .. } if name == alias);
-                    if !same_name {
-                        write!(f, " AS {alias}")?;
-                    }
+                    expr.fmt_aliased(f, alias)?;
                 }
                 writeln!(f)?;
                 input.fmt_indented(f, depth + 1)
@@ -132,15 +119,23 @@ impl LogicalPlan {
                 input.fmt_indented(f, depth + 1)
             }
             LogicalPlan::Limit { input, skip, fetch } => {
-                writeln!(
-                    f,
-                    "Limit: skip {skip}, fetch {}",
-                    fetch.map_or("all".into(), |n| n.to_string())
-                )?;
+                write!(f, "Limit: skip {skip}, fetch ")?;
+                match fetch {
+                    Some(n) => writeln!(f, "{n}")?,
+                    None => writeln!(f, "all")?,
+                }
                 input.fmt_indented(f, depth + 1)
             }
         }
     }
+}
+
+pub fn project_schema(input: &Schema, exprs: &[(Expr, String)]) -> SchemaRef {
+    let fields: Vec<Field> = exprs
+        .iter()
+        .map(|(expr, name)| Field::new(name, expr.data_type(input), expr.nullable(input)))
+        .collect();
+    Arc::new(Schema::new(fields))
 }
 
 pub fn aggregate_key_name(key: &Expr) -> String {

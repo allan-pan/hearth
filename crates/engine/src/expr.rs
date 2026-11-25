@@ -133,6 +133,15 @@ impl Expr {
             },
         })
     }
+
+    pub fn fmt_aliased(&self, f: &mut fmt::Formatter<'_>, alias: &str) -> fmt::Result {
+        write!(f, "{self}")?;
+        let same_name = matches!(self, Expr::Column { name, .. } if name == alias);
+        if !same_name {
+            write!(f, " AS {alias}")?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for Expr {

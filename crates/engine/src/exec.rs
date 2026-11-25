@@ -1,5 +1,7 @@
 //! Vectorized push-based pipeline driver, operators, and expression evaluation.
 
+use std::fmt;
+
 use arrow::record_batch::RecordBatch;
 use storage::stream::BatchStream;
 
@@ -242,6 +244,63 @@ pub struct Pipeline {
     pub source: PhysicalSource,
     pub operators: Vec<PhysicalOperator>,
     pub sink: PhysicalSink,
+}
+
+impl fmt::Display for PhysicalSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scan(scan) => write!(f, "Scan({})", scan.table),
+            Self::Empty => write!(f, "Empty"),
+        }
+    }
+}
+
+impl fmt::Display for PhysicalOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Filter(filter) => write!(f, "Filter: {}", filter.predicate),
+            Self::Project(project) => {
+                write!(f, "Project: ")?;
+                for (i, (expr, field)) in project
+                    .exprs
+                    .iter()
+                    .zip(project.schema.fields())
+                    .enumerate()
+                {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    expr.fmt_aliased(f, field.name())?;
+                }
+                Ok(())
+            }
+            Self::Limit(limit) => {
+                write!(f, "Limit: skip {}, fetch ", limit.skip)?;
+                match limit.fetch {
+                    Some(n) => write!(f, "{n}"),
+                    None => write!(f, "all"),
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for PhysicalSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Collect(_) => write!(f, "CollectSink"),
+        }
+    }
+}
+
+impl fmt::Display for Pipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.source)?;
+        for op in &self.operators {
+            write!(f, " → {op}")?;
+        }
+        write!(f, " → {}", self.sink)
+    }
 }
 
 #[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
@@ -710,7 +769,7 @@ mod tests {
             name: "x".into(),
         };
         let pipeline = Pipeline {
-            source: PhysicalSource::Scan(ScanSource::all_columns(runtime, snapshot)),
+            source: PhysicalSource::Scan(ScanSource::all_columns("t", runtime, snapshot)),
             operators: vec![
                 PhysicalOperator::Filter(FilterOp {
                     predicate: Expr::Binary {

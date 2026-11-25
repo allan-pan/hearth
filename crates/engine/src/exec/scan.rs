@@ -15,13 +15,19 @@ pub struct ScanSource {
     pub projection: Projection,
     pub predicate: Predicate,
     pub limit: Option<usize>,
+    pub table: String,
 }
 
 impl ScanSource {
-    pub fn all_columns(runtime: Arc<StorageRuntime>, snapshot: Snapshot) -> Self {
+    pub fn all_columns(
+        table: impl Into<String>,
+        runtime: Arc<StorageRuntime>,
+        snapshot: Snapshot,
+    ) -> Self {
         let projection =
             Projection::new(snapshot.schema.fields().iter().map(|f| f.name().as_str()));
         Self {
+            table: table.into(),
             runtime,
             snapshot,
             projection,
@@ -111,7 +117,7 @@ mod tests {
             ],
         );
 
-        let source = ScanSource::all_columns(runtime, snapshot);
+        let source = ScanSource::all_columns("people", runtime, snapshot);
         let mut local = source.init_local(&()).unwrap();
 
         let mut ids = Vec::new();
@@ -149,6 +155,7 @@ mod tests {
         );
 
         let source = ScanSource {
+            table: "people".into(),
             runtime,
             snapshot,
             projection: Projection::new(["name"]),
@@ -186,7 +193,7 @@ mod tests {
         );
         snapshot.files[0].path = snapshot.files[0].path.with_file_name("missing.vortex");
 
-        let source = ScanSource::all_columns(runtime, snapshot);
+        let source = ScanSource::all_columns("people", runtime, snapshot);
         let mut local = source.init_local(&()).unwrap();
         assert!(matches!(
             source.next(&(), &mut local),
