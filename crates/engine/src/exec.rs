@@ -5,37 +5,15 @@ use std::fmt;
 use arrow::record_batch::RecordBatch;
 use storage::stream::BatchStream;
 
-use crate::error::EngineResult;
+use crate::QueryResult;
+use crate::error::{EngineError, EngineResult};
+use crate::physical::PhysicalPlan;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod eval;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod filter;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod limit;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod project;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod result;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "execution operators not wired yet")
-)]
 mod scan;
 
 pub use filter::FilterOp;
@@ -44,14 +22,12 @@ pub use project::ProjectOp;
 pub use result::CollectSink;
 pub use scan::ScanSource;
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum PhysicalOperator {
     Filter(FilterOp),
     Project(ProjectOp),
     Limit(LimitOp),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum OperatorLocal {
     Stateless,
     Limit(limit::LimitLocal),
@@ -85,20 +61,25 @@ impl Operator for PhysicalOperator {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum OperatorResult {
     NeedMoreInput(Option<RecordBatch>),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no multi-output operator implemented yet")
+    )]
     HaveMoreOutput(RecordBatch),
     Finished(Option<RecordBatch>),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum SinkResult {
     NeedMoreInput,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no early-finishing sink implemented yet")
+    )]
     Finished,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub trait Source {
     type Global;
     type Local;
@@ -112,7 +93,6 @@ pub trait Source {
     ) -> EngineResult<Option<RecordBatch>>;
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub trait Operator {
     type Global;
     type Local;
@@ -127,7 +107,6 @@ pub trait Operator {
     ) -> EngineResult<OperatorResult>;
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub trait Sink {
     type Global;
     type Local;
@@ -144,13 +123,11 @@ pub trait Sink {
     fn finalize(&self, global: &mut Self::Global) -> EngineResult<()>;
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum PhysicalSource {
     Scan(ScanSource),
     Empty,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum SourceLocal {
     Scan(BatchStream),
     Empty,
@@ -182,17 +159,14 @@ impl Source for PhysicalSource {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum PhysicalSink {
     Collect(CollectSink),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum SinkGlobal {
     Collect(Vec<RecordBatch>),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum SinkLocal {
     Collect(Vec<RecordBatch>),
 }
@@ -239,7 +213,6 @@ impl Sink for PhysicalSink {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub struct Pipeline {
     pub source: PhysicalSource,
     pub operators: Vec<PhysicalOperator>,
@@ -303,12 +276,26 @@ impl fmt::Display for Pipeline {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
-pub fn run(pipeline: &Pipeline) -> EngineResult<SinkGlobal> {
+pub fn execute(plan: PhysicalPlan) -> EngineResult<QueryResult> {
+    let Some((last, rest)) = plan.pipelines.split_last() else {
+        return Err(EngineError::Execution(
+            "physical plan has no pipelines".to_string(),
+        ));
+    };
+    for pipeline in rest {
+        run(pipeline)?;
+    }
+    let SinkGlobal::Collect(batches) = run(last)?;
+    Ok(QueryResult {
+        schema: plan.schema,
+        batches,
+    })
+}
+
+fn run(pipeline: &Pipeline) -> EngineResult<SinkGlobal> {
     drive(&pipeline.source, &pipeline.operators, &pipeline.sink)
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub fn drive<S: Source, O: Operator, K: Sink>(
     source: &S,
     operators: &[O],

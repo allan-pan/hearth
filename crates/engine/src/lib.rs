@@ -1,6 +1,6 @@
 //! Query engine. Reads tables through the `storage` crate.
 use crate::catalog::Catalog;
-use crate::error::{EngineError, EngineResult};
+use crate::error::EngineResult;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use sqlparser::dialect::GenericDialect;
@@ -23,7 +23,6 @@ pub struct QueryResult {
     pub batches: Vec<RecordBatch>,
 }
 
-#[expect(dead_code, reason = "not yet implemented")]
 pub struct Engine {
     runtime: Arc<StorageRuntime>,
     catalog: Arc<dyn Catalog>,
@@ -36,32 +35,8 @@ impl Engine {
 
     pub fn sql(&self, sql: &str) -> EngineResult<QueryResult> {
         let statements = Parser::parse_sql(&GenericDialect {}, sql)?;
-        let _plan = sql::bind(statements, self.catalog.as_ref())?;
-        Err(EngineError::NotSupported(
-            "query execution not implemented".to_string(),
-        ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::catalog::MemoryCatalog;
-
-    fn engine() -> Engine {
-        let runtime = Arc::new(StorageRuntime::new(1, 1).unwrap());
-        Engine::new(runtime, Arc::new(MemoryCatalog::new()))
-    }
-
-    #[test]
-    fn valid_sql_is_not_supported_yet() {
-        let result = engine().sql("select 1");
-        assert!(matches!(result, Err(EngineError::NotSupported(_))));
-    }
-
-    #[test]
-    fn invalid_sql_is_a_parse_error() {
-        let result = engine().sql("selec 1");
-        assert!(matches!(result, Err(EngineError::Parse(_))));
+        let logical = sql::bind(statements, self.catalog.as_ref())?;
+        let physical = physical::plan(&logical, self.runtime.clone())?;
+        exec::execute(physical)
     }
 }

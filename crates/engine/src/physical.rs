@@ -13,13 +13,11 @@ use crate::exec::{
 };
 use crate::logical::{LogicalPlan, project_schema};
 
-#[cfg_attr(not(test), expect(dead_code, reason = "not wired to Engine::sql yet"))]
 pub struct PhysicalPlan {
     pub schema: SchemaRef,
     pub pipelines: Vec<Pipeline>,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "not wired to Engine::sql yet"))]
 pub fn plan(logical: &LogicalPlan, runtime: Arc<StorageRuntime>) -> EngineResult<PhysicalPlan> {
     let (source, operators, schema) = build_pipeline(logical, &runtime)?;
     let pipeline = Pipeline {
