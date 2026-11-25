@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use arrow::array::{Array, StructArray};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use tokio::sync::{OnceCell, mpsc};
@@ -102,6 +103,7 @@ impl Drop for BatchStream {
 struct Shared {
     session: VortexSession,
     cpu: tokio::runtime::Handle,
+    schema: SchemaRef,
     projection: Expression,
     /// `None` when the scan keeps every row.
     filter: Option<Expression>,
@@ -185,6 +187,19 @@ pub fn scan(
     limit: Option<usize>,
 ) -> StorageResult<BatchStream> {
     let scan_plan = plan(snapshot, projection, predicate, limit)?;
+    let projected_schema = Arc::new(Schema::new(
+        projection
+            .columns
+            .iter()
+            .map(|name| {
+                snapshot
+                    .schema
+                    .field_with_name(name)
+                    .expect("validated by plan")
+                    .clone()
+            })
+            .collect::<Vec<_>>(),
+    ));
 
     let splits: Vec<(Arc<FileSource>, Range<u64>)> = scan_plan
         .files
@@ -209,6 +224,7 @@ pub fn scan(
     let shared = Arc::new(Shared {
         session: runtime.session(),
         cpu: runtime.cpu().clone(),
+        schema: projected_schema,
         projection: projection_expr(&projection.columns),
         filter: scan_plan.filter.as_ref().map(predicate_expr),
         tx,
@@ -280,7 +296,7 @@ async fn read_split(
         let work = shared.clone();
         let batch = shared
             .cpu
-            .spawn(async move { to_record_batch(&work.session, chunk) })
+            .spawn(async move { to_record_batch(&work.session, chunk, &work.schema) })
             .await
             .map_err(|e| StorageError::Internal(format!("cpu task failed: {e}")))??;
 
@@ -305,6 +321,7 @@ async fn read_split(
 fn to_record_batch(
     session: &VortexSession,
     array: vortex::array::ArrayRef,
+    schema: &SchemaRef,
 ) -> StorageResult<RecordBatch> {
     let mut ctx = session.create_execution_ctx();
     let arrow_array = session.arrow().execute_arrow(array, None, &mut ctx)?;
@@ -317,7 +334,15 @@ fn to_record_batch(
                 arrow_array.data_type()
             ))
         })?;
-    Ok(RecordBatch::from(structs))
+    let batch = RecordBatch::from(structs);
+    if batch.schema() != *schema {
+        Ok(RecordBatch::try_new(
+            schema.clone(),
+            batch.columns().to_vec(),
+        )?)
+    } else {
+        Ok(batch)
+    }
 }
 
 #[cfg(test)]
@@ -525,5 +550,33 @@ mod tests {
         let values = int64_values(&collect(stream));
         assert_eq!(values.len(), 500);
         assert!(values.iter().all(|&v| v >= 1_500));
+    }
+
+    #[test]
+    fn projected_batches_match_snapshot_schema() {
+        use arrow::array::StringViewArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8View, true),
+        ]));
+        let table = write_table(
+            schema,
+            vec![vec![
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(StringViewArray::from(vec![Some("a"), None])) as ArrayRef,
+            ]],
+        );
+        let rt = runtime(1);
+        let proj = Projection::new(["name", "id"]);
+        let batches = collect(scan(&rt, &table.snapshot, &proj, &Predicate::True, None).unwrap());
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].schema(),
+            Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8View, true),
+                Field::new("id", DataType::Int64, false),
+            ]))
+        );
     }
 }
