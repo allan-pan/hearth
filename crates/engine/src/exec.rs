@@ -25,6 +25,51 @@ mod limit;
 )]
 mod project;
 
+pub use filter::FilterOp;
+pub use limit::LimitOp;
+pub use project::ProjectOp;
+
+#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
+pub enum PhysicalOperator {
+    Filter(FilterOp),
+    Project(ProjectOp),
+    Limit(LimitOp),
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
+pub enum OperatorLocal {
+    Stateless,
+    Limit(limit::LimitLocal),
+}
+
+impl Operator for PhysicalOperator {
+    type Global = ();
+    type Local = OperatorLocal;
+
+    fn init_global(&self) -> Self::Global {}
+
+    fn init_local(&self, _global: &Self::Global) -> Self::Local {
+        match self {
+            Self::Filter(_) | Self::Project(_) => OperatorLocal::Stateless,
+            Self::Limit(op) => OperatorLocal::Limit(op.init_local()),
+        }
+    }
+
+    fn execute(
+        &self,
+        _global: &Self::Global,
+        local: &mut Self::Local,
+        input: &RecordBatch,
+    ) -> EngineResult<OperatorResult> {
+        match (self, local) {
+            (Self::Filter(op), OperatorLocal::Stateless) => op.execute(input),
+            (Self::Project(op), OperatorLocal::Stateless) => op.execute(input),
+            (Self::Limit(_), OperatorLocal::Limit(state)) => state.execute(input),
+            _ => unreachable!("operator and local state always match"),
+        }
+    }
+}
+
 #[cfg_attr(not(test), expect(dead_code, reason = "pipeline not wired yet"))]
 pub enum OperatorResult {
     NeedMoreInput(Option<RecordBatch>),
@@ -448,6 +493,56 @@ mod tests {
 
         assert_eq!(pulls.load(Ordering::SeqCst), 1);
         assert_eq!(collect_values(&out.batches), vec![1]);
+        assert!(out.combined && out.finalized);
+    }
+
+    #[test]
+    fn physical_operator_pipeline_filters_projects_and_limits_early() {
+        use crate::expr::{BinaryOp, Expr, ScalarValue};
+
+        let (source, pulls) = CountingSource::new(vec![
+            int_batch(&[1, 2, 3]),
+            int_batch(&[4, 5, 6]),
+            int_batch(&[7, 8, 9]),
+        ]);
+        let projected_schema = Arc::new(Schema::new(vec![Field::new(
+            "doubled",
+            DataType::Int64,
+            false,
+        )]));
+        let x = || Expr::Column {
+            index: 0,
+            name: "x".into(),
+        };
+        let operators = [
+            PhysicalOperator::Filter(FilterOp {
+                predicate: Expr::Binary {
+                    left: Box::new(x()),
+                    op: BinaryOp::Gt,
+                    right: Box::new(Expr::Literal(ScalarValue::Int64(2))),
+                },
+            }),
+            PhysicalOperator::Project(ProjectOp {
+                exprs: vec![Expr::Binary {
+                    left: Box::new(x()),
+                    op: BinaryOp::Multiply,
+                    right: Box::new(Expr::Literal(ScalarValue::Int64(2))),
+                }],
+                schema: projected_schema.clone(),
+            }),
+            PhysicalOperator::Limit(LimitOp {
+                skip: 1,
+                fetch: Some(2),
+            }),
+        ];
+        let sink = CollectSink { stop_after: None };
+        let out = drive(&source, &operators, &sink).unwrap();
+
+        // Batch 1 yields [3] (skipped), Batch 2 yields [4, 5, 6] -> emits [8, 10] and finishes.
+        // Batch 3 is never pulled.
+        assert_eq!(pulls.load(Ordering::SeqCst), 2);
+        assert_eq!(collect_values(&out.batches), vec![8, 10]);
+        assert_eq!(out.batches[0].schema(), projected_schema);
         assert!(out.combined && out.finalized);
     }
 }
