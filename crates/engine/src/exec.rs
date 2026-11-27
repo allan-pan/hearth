@@ -22,6 +22,13 @@ pub use project::ProjectOp;
 pub use result::CollectSink;
 pub use scan::ScanSource;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no breaker source implemented yet")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotId(pub usize);
+
 pub enum PhysicalOperator {
     Filter(FilterOp),
     Project(ProjectOp),
@@ -84,7 +91,7 @@ pub trait Source {
     type Global;
     type Local;
 
-    fn init_global(&self) -> Self::Global;
+    fn init_global(&self, slots: &[SinkGlobal]) -> Self::Global;
     fn init_local(&self, global: &Self::Global) -> EngineResult<Self::Local>;
     fn next(
         &self,
@@ -137,7 +144,7 @@ impl Source for PhysicalSource {
     type Global = ();
     type Local = SourceLocal;
 
-    fn init_global(&self) -> Self::Global {}
+    fn init_global(&self, _slots: &[SinkGlobal]) -> Self::Global {}
 
     fn init_local(&self, global: &Self::Global) -> EngineResult<Self::Local> {
         match self {
@@ -282,26 +289,28 @@ pub fn execute(plan: PhysicalPlan) -> EngineResult<QueryResult> {
             "physical plan has no pipelines".to_string(),
         ));
     };
+    let mut completed = Vec::with_capacity(rest.len());
     for pipeline in rest {
-        run(pipeline)?;
+        completed.push(run(pipeline, &completed)?);
     }
-    let SinkGlobal::Collect(batches) = run(last)?;
+    let SinkGlobal::Collect(batches) = run(last, &completed)?;
     Ok(QueryResult {
         schema: plan.schema,
         batches,
     })
 }
 
-fn run(pipeline: &Pipeline) -> EngineResult<SinkGlobal> {
-    drive(&pipeline.source, &pipeline.operators, &pipeline.sink)
+fn run(pipeline: &Pipeline, slots: &[SinkGlobal]) -> EngineResult<SinkGlobal> {
+    drive(&pipeline.source, &pipeline.operators, &pipeline.sink, slots)
 }
 
 pub fn drive<S: Source, O: Operator, K: Sink>(
     source: &S,
     operators: &[O],
     sink: &K,
+    slots: &[SinkGlobal],
 ) -> EngineResult<K::Global> {
-    let source_global = source.init_global();
+    let source_global = source.init_global(slots);
     let mut source_local = source.init_local(&source_global)?;
 
     let op_globals: Vec<O::Global> = operators.iter().map(Operator::init_global).collect();
@@ -458,7 +467,7 @@ mod tests {
         type Global = ();
         type Local = usize;
 
-        fn init_global(&self) {}
+        fn init_global(&self, _slots: &[SinkGlobal]) {}
         fn init_local(&self, _global: &()) -> EngineResult<usize> {
             Ok(0)
         }
@@ -590,7 +599,7 @@ mod tests {
     fn empty_source_still_calls_combine_and_finalize() {
         let (source, pulls) = CountingSource::new(vec![]);
         let sink = RecordingSink { stop_after: None };
-        let out = drive::<_, TestOp, _>(&source, &[], &sink).unwrap();
+        let out = drive::<_, TestOp, _>(&source, &[], &sink, &[]).unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 1);
         assert!(out.batches.is_empty());
@@ -603,7 +612,7 @@ mod tests {
         let (source, pulls) = CountingSource::new(vec![int_batch(&[1, 2]), int_batch(&[3])]);
         let sink = RecordingSink { stop_after: None };
         // Repeat(3) emits HaveMoreOutput twice, then NeedMoreInput(Some) on the 3rd call.
-        let out = drive(&source, &[TestOp::Repeat(3)], &sink).unwrap();
+        let out = drive(&source, &[TestOp::Repeat(3)], &sink, &[]).unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 3); // 2 batches + final None
         assert_eq!(
@@ -622,7 +631,7 @@ mod tests {
             int_batch(&[4]),
         ]);
         let sink = RecordingSink { stop_after: None };
-        let out = drive(&source, &[TestOp::StopAfter(2)], &sink).unwrap();
+        let out = drive(&source, &[TestOp::StopAfter(2)], &sink, &[]).unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 2);
         assert_eq!(collect_values(&out.batches), vec![1, 2]);
@@ -634,7 +643,13 @@ mod tests {
         let (source, pulls) = CountingSource::new(vec![int_batch(&[10]), int_batch(&[20])]);
         let sink = RecordingSink { stop_after: None };
         // Repeat(3) wants to emit [10] three times, but StopAfter(2) finishes on the 2nd.
-        let out = drive(&source, &[TestOp::Repeat(3), TestOp::StopAfter(2)], &sink).unwrap();
+        let out = drive(
+            &source,
+            &[TestOp::Repeat(3), TestOp::StopAfter(2)],
+            &sink,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 1);
         assert_eq!(collect_values(&out.batches), vec![10, 10]);
@@ -645,7 +660,7 @@ mod tests {
     fn need_more_input_none_drops_batches_without_calling_sink() {
         let (source, pulls) = CountingSource::new(vec![int_batch(&[1]), int_batch(&[2])]);
         let sink = RecordingSink { stop_after: None };
-        let out = drive(&source, &[TestOp::DropAll], &sink).unwrap();
+        let out = drive(&source, &[TestOp::DropAll], &sink, &[]).unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 3);
         assert!(out.batches.is_empty());
@@ -659,7 +674,7 @@ mod tests {
         let sink = RecordingSink {
             stop_after: Some(1),
         };
-        let out = drive::<_, TestOp, _>(&source, &[], &sink).unwrap();
+        let out = drive::<_, TestOp, _>(&source, &[], &sink, &[]).unwrap();
 
         assert_eq!(pulls.load(Ordering::SeqCst), 1);
         assert_eq!(collect_values(&out.batches), vec![1]);
@@ -706,7 +721,7 @@ mod tests {
             }),
         ];
         let sink = RecordingSink { stop_after: None };
-        let out = drive(&source, &operators, &sink).unwrap();
+        let out = drive(&source, &operators, &sink, &[]).unwrap();
 
         // Batch 1 yields [3] (skipped), Batch 2 yields [4, 5, 6] -> emits [8, 10] and finishes.
         // Batch 3 is never pulled.
@@ -723,7 +738,7 @@ mod tests {
             operators: vec![],
             sink: PhysicalSink::Collect(CollectSink),
         };
-        let SinkGlobal::Collect(batches) = run(&pipeline).unwrap();
+        let SinkGlobal::Collect(batches) = run(&pipeline, &[]).unwrap();
         assert!(batches.is_empty());
     }
 
@@ -781,8 +796,51 @@ mod tests {
             sink: PhysicalSink::Collect(CollectSink),
         };
 
-        let SinkGlobal::Collect(batches) = run(&pipeline).unwrap();
+        let SinkGlobal::Collect(batches) = run(&pipeline, &[]).unwrap();
         assert_eq!(collect_values(&batches), vec![6, 8]);
         assert_eq!(batches[0].schema(), projected_schema);
+    }
+
+    struct SlotSource(SlotId);
+
+    impl Source for SlotSource {
+        type Global = Vec<RecordBatch>;
+        type Local = usize;
+
+        fn init_global(&self, slots: &[SinkGlobal]) -> Vec<RecordBatch> {
+            let SinkGlobal::Collect(batches) = &slots[self.0.0];
+            batches.clone()
+        }
+
+        fn init_local(&self, _global: &Vec<RecordBatch>) -> EngineResult<usize> {
+            Ok(0)
+        }
+
+        fn next(
+            &self,
+            global: &Vec<RecordBatch>,
+            index: &mut usize,
+        ) -> EngineResult<Option<RecordBatch>> {
+            let batch = global.get(*index).cloned();
+            if batch.is_some() {
+                *index += 1;
+            }
+            Ok(batch)
+        }
+    }
+
+    #[test]
+    fn pipeline_handoff_via_slot_id() {
+        let (source1, _) = CountingSource::new(vec![int_batch(&[1, 2]), int_batch(&[3, 4])]);
+        let slot0 =
+            drive::<_, TestOp, _>(&source1, &[], &PhysicalSink::Collect(CollectSink), &[]).unwrap();
+        let slots = vec![slot0];
+
+        let source2 = SlotSource(SlotId(0));
+        let SinkGlobal::Collect(batches) =
+            drive::<_, TestOp, _>(&source2, &[], &PhysicalSink::Collect(CollectSink), &slots)
+                .unwrap();
+
+        assert_eq!(collect_values(&batches), vec![1, 2, 3, 4]);
     }
 }
