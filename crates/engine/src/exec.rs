@@ -9,6 +9,8 @@ use crate::QueryResult;
 use crate::error::{EngineError, EngineResult};
 use crate::physical::PhysicalPlan;
 
+#[cfg_attr(not(test), expect(dead_code, reason = "aggregate operators not wired"))]
+mod aggregate;
 mod eval;
 mod filter;
 mod limit;
