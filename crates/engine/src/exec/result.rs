@@ -8,6 +8,7 @@ pub struct CollectSink;
 impl Sink for CollectSink {
     type Global = Vec<RecordBatch>;
     type Local = Vec<RecordBatch>;
+    type Output = Vec<RecordBatch>;
 
     fn init_global(&self) -> Self::Global {
         Vec::new()
@@ -32,7 +33,7 @@ impl Sink for CollectSink {
         Ok(())
     }
 
-    fn finalize(&self, _global: &mut Self::Global) -> EngineResult<()> {
-        Ok(())
+    fn finalize(&self, global: Self::Global) -> EngineResult<Self::Output> {
+        Ok(global)
     }
 }

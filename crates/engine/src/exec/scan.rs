@@ -7,7 +7,7 @@ use storage::stream::{self, BatchStream};
 use storage::table::Snapshot;
 
 use crate::error::EngineResult;
-use crate::exec::{SinkGlobal, Source};
+use crate::exec::{SlotValue, Source};
 
 pub struct ScanSource {
     pub runtime: Arc<StorageRuntime>,
@@ -41,7 +41,7 @@ impl Source for ScanSource {
     type Global = ();
     type Local = BatchStream;
 
-    fn init_global(&self, _slots: &[SinkGlobal]) -> Self::Global {}
+    fn init_global(&self, _slots: &[SlotValue]) -> Self::Global {}
 
     fn init_local(&self, _global: &Self::Global) -> EngineResult<Self::Local> {
         Ok(stream::scan(

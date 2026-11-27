@@ -89,10 +89,22 @@ impl ExtremumState {
         };
         match self {
             Self::Int32(values) => update_prim_extremum::<Int32Type>(
-                values, array, is_scalar, group_ids, scalar_rows, dir, Ord::cmp,
+                values,
+                array,
+                is_scalar,
+                group_ids,
+                scalar_rows,
+                dir,
+                Ord::cmp,
             ),
             Self::Int64(values) => update_prim_extremum::<Int64Type>(
-                values, array, is_scalar, group_ids, scalar_rows, dir, Ord::cmp,
+                values,
+                array,
+                is_scalar,
+                group_ids,
+                scalar_rows,
+                dir,
+                Ord::cmp,
             ),
             Self::Float64(values) => update_prim_extremum::<Float64Type>(
                 values,
@@ -104,10 +116,22 @@ impl ExtremumState {
                 f64::total_cmp,
             ),
             Self::Decimal128 { values, .. } => update_prim_extremum::<Decimal128Type>(
-                values, array, is_scalar, group_ids, scalar_rows, dir, Ord::cmp,
+                values,
+                array,
+                is_scalar,
+                group_ids,
+                scalar_rows,
+                dir,
+                Ord::cmp,
             ),
             Self::Date32(values) => update_prim_extremum::<Date32Type>(
-                values, array, is_scalar, group_ids, scalar_rows, dir, Ord::cmp,
+                values,
+                array,
+                is_scalar,
+                group_ids,
+                scalar_rows,
+                dir,
+                Ord::cmp,
             ),
             Self::Boolean(values) => {
                 let typed = array.as_boolean();
@@ -147,12 +171,7 @@ impl ExtremumState {
         }
     }
 
-    fn merge_from(
-        &mut self,
-        dir: Direction,
-        other: Self,
-        group_map: &[u32],
-    ) -> EngineResult<()> {
+    fn merge_from(&mut self, dir: Direction, other: Self, group_map: &[u32]) -> EngineResult<()> {
         match (self, other) {
             (Self::Int32(target), Self::Int32(source))
             | (Self::Date32(target), Self::Date32(source)) => {
@@ -222,9 +241,9 @@ impl ExtremumState {
                 precision,
                 scale,
                 values,
-            } => Arc::new(
-                Decimal128Array::from(values).with_precision_and_scale(precision, scale)?,
-            ),
+            } => {
+                Arc::new(Decimal128Array::from(values).with_precision_and_scale(precision, scale)?)
+            }
             Self::Date32(values) => Arc::new(Date32Array::from(values)),
             Self::Utf8View(values) => Arc::new(StringViewArray::from_iter(values)),
             Self::Boolean(values) => Arc::new(BooleanArray::from(values)),
@@ -244,7 +263,6 @@ enum State {
         scale: i8,
         values: Vec<Option<i128>>,
     },
-    /// Handles `AVG` over `Int32`/`Int64` (`scale = 0`) and `Decimal128(_, scale)`.
     AvgScaled {
         scale: i8,
         sums: Vec<i128>,
@@ -568,7 +586,8 @@ impl Accumulator {
                     counts: source_counts,
                 },
             ) if *target_scale == source_scale => {
-                for (old_group, (sum, count)) in source_sums.into_iter().zip(source_counts).enumerate()
+                for (old_group, (sum, count)) in
+                    source_sums.into_iter().zip(source_counts).enumerate()
                 {
                     let target_group = group_map[old_group] as usize;
                     target_sums[target_group] = target_sums[target_group]
@@ -587,7 +606,8 @@ impl Accumulator {
                     counts: source_counts,
                 },
             ) => {
-                for (old_group, (sum, count)) in source_sums.into_iter().zip(source_counts).enumerate()
+                for (old_group, (sum, count)) in
+                    source_sums.into_iter().zip(source_counts).enumerate()
                 {
                     let target_group = group_map[old_group] as usize;
                     target_sums[target_group] += sum;
@@ -854,11 +874,8 @@ mod tests {
         assert_eq!(out.value(0), 3.75);
         assert!(out.is_null(1));
 
-        let mut sum_dec = Accumulator::new(
-            &call(AggFunc::Sum),
-            &schema_of(DataType::Decimal128(10, 2)),
-        )
-        .unwrap();
+        let mut sum_dec =
+            Accumulator::new(&call(AggFunc::Sum), &schema_of(DataType::Decimal128(10, 2))).unwrap();
         sum_dec.resize(2);
         let arr = ColumnarValue::Array(Arc::new(
             Decimal128Array::from(vec![Some(1050), Some(250), None])
@@ -885,11 +902,8 @@ mod tests {
         ));
 
         let max_38: i128 = 10_i128.pow(38) - 1;
-        let mut sum_dec = Accumulator::new(
-            &call(AggFunc::Sum),
-            &schema_of(DataType::Decimal128(38, 0)),
-        )
-        .unwrap();
+        let mut sum_dec =
+            Accumulator::new(&call(AggFunc::Sum), &schema_of(DataType::Decimal128(38, 0))).unwrap();
         sum_dec.resize(1);
         let arr = ColumnarValue::Array(Arc::new(
             Decimal128Array::from(vec![max_38, 1])
@@ -901,11 +915,8 @@ mod tests {
             Err(EngineError::Execution(_))
         ));
 
-        let mut avg_dec = Accumulator::new(
-            &call(AggFunc::Avg),
-            &schema_of(DataType::Decimal128(38, 0)),
-        )
-        .unwrap();
+        let mut avg_dec =
+            Accumulator::new(&call(AggFunc::Avg), &schema_of(DataType::Decimal128(38, 0))).unwrap();
         avg_dec.resize(1);
         let arr = ColumnarValue::Array(Arc::new(
             Decimal128Array::from(vec![max_38, max_38])
@@ -934,11 +945,8 @@ mod tests {
         assert_eq!(out.value(0), i64::MAX as f64);
         assert!(out.is_null(1));
 
-        let mut avg_dec = Accumulator::new(
-            &call(AggFunc::Avg),
-            &schema_of(DataType::Decimal128(10, 2)),
-        )
-        .unwrap();
+        let mut avg_dec =
+            Accumulator::new(&call(AggFunc::Avg), &schema_of(DataType::Decimal128(10, 2))).unwrap();
         avg_dec.resize(1);
         let arr = ColumnarValue::Array(Arc::new(
             Decimal128Array::from(vec![100, 200, 300])
@@ -1062,14 +1070,9 @@ mod tests {
         let target_arr = ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(10), None])));
         target.update_batch(Some(&target_arr), &[0, 1]).unwrap();
 
-        let source_arr = ColumnarValue::Array(Arc::new(Int64Array::from(vec![
-            Some(5),
-            Some(20),
-            None,
-        ])));
-        source
-            .update_batch(Some(&source_arr), &[0, 1, 2])
-            .unwrap();
+        let source_arr =
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(5), Some(20), None])));
+        source.update_batch(Some(&source_arr), &[0, 1, 2]).unwrap();
 
         target.merge_from(source, &[0, 1, 2]).unwrap();
         let out = target.finalize().unwrap();
@@ -1100,16 +1103,10 @@ mod tests {
             Err(EngineError::Execution(_))
         ));
 
-        let mut scale2 = Accumulator::new(
-            &call(AggFunc::Sum),
-            &schema_of(DataType::Decimal128(10, 2)),
-        )
-        .unwrap();
-        let scale4 = Accumulator::new(
-            &call(AggFunc::Sum),
-            &schema_of(DataType::Decimal128(10, 4)),
-        )
-        .unwrap();
+        let mut scale2 =
+            Accumulator::new(&call(AggFunc::Sum), &schema_of(DataType::Decimal128(10, 2))).unwrap();
+        let scale4 =
+            Accumulator::new(&call(AggFunc::Sum), &schema_of(DataType::Decimal128(10, 4))).unwrap();
         assert!(matches!(
             scale2.merge_from(scale4, &[]),
             Err(EngineError::Execution(_))

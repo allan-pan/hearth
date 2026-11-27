@@ -16,21 +16,27 @@ struct Entry {
     group_id: u32,
 }
 
+pub type GroupConverter = Arc<RowConverter>;
+
+pub fn build_converter(key_types: &[DataType]) -> EngineResult<GroupConverter> {
+    Ok(Arc::new(RowConverter::new(
+        key_types.iter().cloned().map(SortField::new).collect(),
+    )?))
+}
+
 pub struct GroupTable {
-    converter: Arc<RowConverter>,
+    converter: GroupConverter,
     keys: Rows,
     slots: Vec<Entry>,
 }
 
 impl GroupTable {
+    #[cfg(test)]
     pub fn new(key_types: &[DataType]) -> EngineResult<Self> {
-        let converter = Arc::new(RowConverter::new(
-            key_types.iter().cloned().map(SortField::new).collect(),
-        )?);
-        Ok(Self::with_converter(converter))
+        Ok(Self::with_converter(build_converter(key_types)?))
     }
 
-    pub fn with_converter(converter: Arc<RowConverter>) -> Self {
+    pub fn with_converter(converter: GroupConverter) -> Self {
         let keys = converter.empty_rows(0, 0);
         Self {
             converter,
@@ -45,7 +51,8 @@ impl GroupTable {
         }
     }
 
-    pub fn converter(&self) -> &Arc<RowConverter> {
+    #[cfg(test)]
+    pub fn converter(&self) -> &GroupConverter {
         &self.converter
     }
 
