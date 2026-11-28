@@ -47,20 +47,7 @@ impl LogicalPlan {
                 group_by,
                 aggregates,
                 input,
-            } => {
-                let input = input.schema();
-                let keys = group_by.iter().map(|expr| {
-                    Field::new(
-                        aggregate_key_name(expr),
-                        expr.data_type(&input),
-                        expr.nullable(&input),
-                    )
-                });
-                let results = aggregates
-                    .iter()
-                    .map(|agg| Field::new(agg.to_string(), agg.data_type(&input), agg.nullable()));
-                Arc::new(Schema::new(keys.chain(results).collect::<Vec<_>>()))
-            }
+            } => aggregate_schema(&input.schema(), group_by, aggregates),
             LogicalPlan::Sort { input, .. } => input.schema(),
             LogicalPlan::Limit { input, .. } => input.schema(),
         }
@@ -136,6 +123,20 @@ pub fn project_schema(input: &Schema, exprs: &[(Expr, String)]) -> SchemaRef {
         .map(|(expr, name)| Field::new(name, expr.data_type(input), expr.nullable(input)))
         .collect();
     Arc::new(Schema::new(fields))
+}
+
+pub fn aggregate_schema(input: &Schema, group_by: &[Expr], aggregates: &[AggExpr]) -> SchemaRef {
+    let keys = group_by.iter().map(|expr| {
+        Field::new(
+            aggregate_key_name(expr),
+            expr.data_type(input),
+            expr.nullable(input),
+        )
+    });
+    let results = aggregates
+        .iter()
+        .map(|agg| Field::new(agg.to_string(), agg.data_type(input), agg.nullable()));
+    Arc::new(Schema::new(keys.chain(results).collect::<Vec<_>>()))
 }
 
 pub fn aggregate_key_name(key: &Expr) -> String {

@@ -156,16 +156,45 @@ fn invalid_sql_is_a_parse_error() {
 }
 
 #[test]
-fn aggregate_and_sort_are_not_supported_yet() {
+fn sort_is_not_supported_yet() {
     let db = orders_db();
-    assert!(matches!(
-        db.engine.sql("SELECT COUNT(*) FROM orders"),
-        Err(EngineError::NotSupported(_))
-    ));
     assert!(matches!(
         db.engine.sql("SELECT id FROM orders ORDER BY id"),
         Err(EngineError::NotSupported(_))
     ));
+}
+
+#[test]
+fn ungrouped_and_grouped_aggregates_execute_end_to_end() {
+    let db = orders_db();
+
+    let ungrouped = db
+        .engine
+        .sql("SELECT COUNT(*), SUM(id) AS total_id FROM orders")
+        .unwrap();
+    assert_eq!(sorted_rows(&ungrouped), vec!["5, 15"]);
+
+    let empty_ungrouped = db
+        .engine
+        .sql("SELECT COUNT(*), SUM(id) FROM orders WHERE id < 0")
+        .unwrap();
+    assert_eq!(sorted_rows(&empty_ungrouped), vec!["0, NULL"]);
+
+    let grouped = db
+        .engine
+        .sql("SELECT status, COUNT(*), SUM(id) FROM orders GROUP BY status")
+        .unwrap();
+    assert_eq!(
+        sorted_rows(&grouped),
+        vec!["NULL, 1, 2", "closed, 1, 4", "hold, 1, 3", "open, 2, 6"]
+    );
+
+    let lim0 = db
+        .engine
+        .sql("SELECT COUNT(*) AS cnt FROM orders LIMIT 0")
+        .unwrap();
+    assert_eq!(row_count(&lim0), 0);
+    assert_eq!(lim0.schema.field(0).name(), "cnt");
 }
 
 #[test]

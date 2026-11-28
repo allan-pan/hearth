@@ -41,7 +41,6 @@ pub struct SlotSource {
 }
 
 impl SlotSource {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in physical planner"))]
     pub fn new(slot: SlotId) -> Self {
         Self {
             slot,
@@ -203,7 +202,6 @@ pub trait Sink {
 pub enum PhysicalSource {
     Scan(ScanSource),
     Empty,
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in physical planner"))]
     Slot(SlotSource),
 }
 
@@ -264,7 +262,6 @@ impl Source for PhysicalSource {
 
 pub enum PhysicalSink {
     Collect(CollectSink),
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in physical planner"))]
     Aggregate(AggregateSink),
 }
 
@@ -355,7 +352,7 @@ impl fmt::Display for PhysicalSource {
         match self {
             Self::Scan(scan) => write!(f, "Scan({})", scan.table),
             Self::Empty => write!(f, "Empty"),
-            Self::Slot(_) => write!(f, "SlotSource"),
+            Self::Slot(source) => write!(f, "SlotSource(P{})", source.slot.0 + 1),
         }
     }
 }

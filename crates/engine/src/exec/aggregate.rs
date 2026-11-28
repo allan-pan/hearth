@@ -46,7 +46,6 @@ pub enum AggregateGlobal {
 }
 
 impl AggregateSink {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in physical planner"))]
     pub fn new(
         group_by: Vec<Expr>,
         aggregates: Vec<AggExpr>,
@@ -375,8 +374,12 @@ mod tests {
         let mut local1 = sink.init_local(&global);
         let mut local2 = sink.init_local(&global);
 
-        sink.sink(&global, &mut local1, make_batch(&[Some("a"), Some("b")], &[Some(10), None]))
-            .unwrap();
+        sink.sink(
+            &global,
+            &mut local1,
+            make_batch(&[Some("a"), Some("b")], &[Some(10), None]),
+        )
+        .unwrap();
         sink.sink(&global, &mut local2, make_batch(&[Some("c")], &[Some(25)]))
             .unwrap();
 
@@ -432,13 +435,8 @@ mod tests {
             DataType::Utf8View,
             true,
         )]));
-        let sink = AggregateSink::new(
-            vec![col(0, "dept")],
-            vec![],
-            input_schema(),
-            out_schema,
-        )
-        .unwrap();
+        let sink =
+            AggregateSink::new(vec![col(0, "dept")], vec![], input_schema(), out_schema).unwrap();
 
         let mut global = sink.init_global();
         let mut local1 = sink.init_local(&global);
@@ -447,13 +445,19 @@ mod tests {
         sink.sink(
             &global,
             &mut local1,
-            make_batch(&[Some("eng"), Some("sales"), None], &[Some(1), Some(2), Some(3)]),
+            make_batch(
+                &[Some("eng"), Some("sales"), None],
+                &[Some(1), Some(2), Some(3)],
+            ),
         )
         .unwrap();
         sink.sink(
             &global,
             &mut local2,
-            make_batch(&[Some("sales"), Some("ops"), None], &[Some(4), Some(5), Some(6)]),
+            make_batch(
+                &[Some("sales"), Some("ops"), None],
+                &[Some(4), Some(5), Some(6)],
+            ),
         )
         .unwrap();
 
@@ -470,27 +474,17 @@ mod tests {
 
     #[test]
     fn aggregate_rejects_empty_group_by_and_empty_aggregates() {
-        let err = AggregateSink::new(
-            vec![],
-            vec![],
-            input_schema(),
-            Arc::new(Schema::empty()),
-        )
-        .err()
-        .expect("empty aggregate must fail");
+        let err = AggregateSink::new(vec![], vec![], input_schema(), Arc::new(Schema::empty()))
+            .err()
+            .expect("empty aggregate must fail");
         assert!(matches!(err, EngineError::Execution(_)));
     }
 
     #[test]
     fn slot_source_slices_aggregate_output_into_configured_batch_size() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let sink = AggregateSink::new(
-            vec![col(0, "id")],
-            vec![],
-            schema.clone(),
-            schema.clone(),
-        )
-        .unwrap();
+        let sink =
+            AggregateSink::new(vec![col(0, "id")], vec![], schema.clone(), schema.clone()).unwrap();
 
         let mut global = sink.init_global();
         let mut local = sink.init_local(&global);
